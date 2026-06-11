@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/forgeone-cli",
+    "crates/forgeone-context",
+    "crates/forgeone-model",
+    "crates/forgeone-policy",
+    "crates/forgeone-runtime",
+    "crates/forgeone-tools",
+    "crates/forgeone-trace",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["ForgeOne Contributors"]
+repository = "https://github.com/civilization-os/forgeone"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

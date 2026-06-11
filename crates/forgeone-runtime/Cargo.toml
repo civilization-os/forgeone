@@ -1,0 +1,19 @@
+[package]
+name = "forgeone-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+forgeone-context = { path = "../forgeone-context" }
+forgeone-model = { path = "../forgeone-model" }
+forgeone-policy = { path = "../forgeone-policy" }
+forgeone-trace = { path = "../forgeone-trace" }
+forgeone-tools = { path = "../forgeone-tools" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+path = "src/lib.rs"
