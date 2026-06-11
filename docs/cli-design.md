@@ -88,3 +88,5 @@ CLI 输出应包含三层信息：
 ## 与 TUI 的边界
 
 CLI 适合脚本化和一次性任务；TUI 适合长会话检查与交互式控制。两者共享 Runtime，不共享私有逻辑。
+
+TUI 的首版布局与交互模型见 [docs/tui-design.md](/root/project/ai/forgeone/docs/tui-design.md)。

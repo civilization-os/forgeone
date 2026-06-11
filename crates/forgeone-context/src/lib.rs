@@ -111,6 +111,8 @@ impl WorkingMemory {
 pub struct ObservationSummary {
     pub tool_name: String,
     pub summary: String,
+    /// Full tool output content, if available.
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +136,20 @@ impl ContextBudget {
     }
 }
 
+/// Minimal tool description for context injection.
+/// Carries only what the model needs to know about available tools.
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+}
+
+impl ToolInfo {
+    pub fn to_prompt_block(&self) -> String {
+        format!("- `{}`: {}", self.name, self.description)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContextBuildInput {
     pub session_id: String,
@@ -146,6 +162,7 @@ pub struct ContextBuildInput {
     pub policy_injections: Vec<String>,
     pub working_memory: WorkingMemory,
     pub token_budget: u32,
+    pub tool_descriptors: Vec<ToolInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,12 +205,25 @@ impl ContextEngine for DefaultContextEngine {
         let mut compression_events = Vec::new();
         let mut sources = Vec::new();
 
+        // Append tool descriptors as structured instructions
+        let tool_block = if input.tool_descriptors.is_empty() {
+            String::new()
+        } else {
+            let mut block = "\n\n## Available Tools\n\n".to_string();
+            for tool in &input.tool_descriptors {
+                block.push_str(&tool.to_prompt_block());
+                block.push('\n');
+            }
+            block
+        };
+        let system_content = format!("{}{}", input.system_prompt, tool_block);
+
         sources.push(ContextSource {
             source_id: next_source_id(),
             source_type: ContextSourceType::SystemPrompt,
             label: "system_prompt".to_string(),
             content: truncate_with_budget(
-                &input.system_prompt,
+                &system_content,
                 budget.reserved_system_tokens,
                 &mut compression_events,
                 "system_prompt",
@@ -247,16 +277,26 @@ impl ContextEngine for DefaultContextEngine {
             });
         }
 
-        for (index, observation) in input.tool_observations.iter().take(2).enumerate() {
+        // Recent observations first, capped at 10 for safety. Budget truncation
+        // (via truncate_with_budget) is the primary capacity control.
+        for (index, observation) in input.tool_observations.iter().rev().take(10).enumerate() {
+            let content = if let Some(output) = &observation.content {
+                format!(
+                    "## Tool Result: {}\n\n{}\n\n```\n{}\n```",
+                    observation.tool_name, observation.summary, output
+                )
+            } else {
+                format!(
+                    "tool={} summary={}",
+                    observation.tool_name, observation.summary
+                )
+            };
             sources.push(ContextSource {
                 source_id: next_source_id(),
                 source_type: ContextSourceType::ToolObservation,
-                label: format!("tool_observation_{index}"),
+                label: format!("tool_observation_{}", index),
                 content: truncate_with_budget(
-                    &format!(
-                        "tool={} summary={}",
-                        observation.tool_name, observation.summary
-                    ),
+                    &content,
                     budget.reserved_observation_tokens / 2,
                     &mut compression_events,
                     "tool_observation",
@@ -433,6 +473,7 @@ mod tests {
             tool_observations: vec![ObservationSummary {
                 tool_name: "read_file".to_string(),
                 summary: "read runtime source".to_string(),
+                content: None,
             }],
             system_prompt: "you are a coding agent".to_string(),
             policy_injections: vec!["do not exceed token budget".to_string()],
@@ -442,6 +483,7 @@ mod tests {
                 pending_items: vec!["build context snapshot".to_string()],
             },
             token_budget: 128,
+            tool_descriptors: vec![],
         });
 
         assert_eq!(snapshot.loop_index, 1);
@@ -454,5 +496,46 @@ mod tests {
                 .iter()
                 .any(|source| source.label == "working_memory")
         );
+    }
+
+    #[test]
+    fn context_injects_tool_descriptors_into_system_prompt() {
+        let engine = DefaultContextEngine;
+        let snapshot = engine.build(ContextBuildInput {
+            session_id: "session-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            loop_index: 1,
+            task_input: "list files".to_string(),
+            session_history: vec![],
+            tool_observations: vec![],
+            system_prompt: "you are a coding agent".to_string(),
+            policy_injections: vec![],
+            working_memory: WorkingMemory {
+                current_goal: "list files".to_string(),
+                completed_items: vec![],
+                pending_items: vec![],
+            },
+            token_budget: 1024,
+            tool_descriptors: vec![
+                super::ToolInfo {
+                    name: "read_file".to_string(),
+                    description: "Read a file from workspace".to_string(),
+                },
+                super::ToolInfo {
+                    name: "search_content".to_string(),
+                    description: "Grep file contents".to_string(),
+                },
+            ],
+        });
+
+        let system_msg = snapshot
+            .prompt_messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("should have a system message");
+
+        assert!(system_msg.content.contains("read_file"));
+        assert!(system_msg.content.contains("search_content"));
+        assert!(system_msg.content.contains("Available Tools"));
     }
 }

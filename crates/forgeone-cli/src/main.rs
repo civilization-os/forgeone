@@ -59,6 +59,12 @@ fn run() -> Result<(), String> {
                             push_unique(&mut config.policy.allowed_tools, tool.to_string());
                         }
                     }
+                    "--read-root" => {
+                        let value = args
+                            .next()
+                            .ok_or_else(|| "missing value for --read-root".to_string())?;
+                        push_unique(&mut config.policy.read_roots, value);
+                    }
                     "--approval-read-root" => {
                         let value = args
                             .next()

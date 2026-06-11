@@ -7,20 +7,40 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use forgeone_context::{
     ContextBuildInput, ContextEngine, ContextSnapshot, DefaultContextEngine, ObservationSummary,
-    WorkingMemory,
+    ToolInfo, WorkingMemory,
 };
 use forgeone_model::{
     MockModelAdapter, ModelAction, ModelAdapter, ModelRequest, ModelResponse, next_model_request_id,
 };
 use forgeone_policy::{ApprovalRequest, PolicyConfig, PolicyDecision, PolicyEngine};
 use forgeone_tools::{
-    Observation, ToolCallRequest, ToolCallResult, ToolRegistry, next_tool_call_id,
+    Observation, ToolCallRequest, ToolCallResult, ToolDescriptor, ToolRegistry, next_tool_call_id,
 };
 use forgeone_trace::{InMemoryTraceStore, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const SYSTEM_PROMPT: &str = "You are ForgeOne, a terminal-first coding agent runtime.
+
+## Tool Calling Protocol
+
+When you need to gather information, output a JSON object on its own line:
+
+{\"tool\": \"<tool_name>\", \"arguments\": {\"<arg_name>\": \"<arg_value>\"}}
+
+Example:
+{\"tool\": \"read_file\", \"arguments\": {\"path\": \"Cargo.toml\"}}
+
+## Rules
+
+1. Call a tool only when you lack information to answer the task.
+2. After receiving a tool result, ANALYZE the result immediately. If it contains the answer, produce your final answer in plain text.
+3. NEVER call the same tool twice for the same purpose. The result is already in your context.
+4. If a tool call is denied, produce the best answer you can with the information you already have.
+5. When the task is complete, output your final answer as plain text — do NOT include any JSON.
+6. Always respond in the same language as the user's question.";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -244,6 +264,7 @@ pub struct SessionTraceRecord {
 pub struct ApprovalObservationRecord {
     pub tool_name: String,
     pub summary: String,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,86 +330,7 @@ impl RuntimeCore {
             budget_usage: BudgetUsage::default(),
             stop_reason: None,
         };
-        let mut final_response = None;
-
-        for loop_index in 1..=session.config.max_loops {
-            state.loop_index = loop_index;
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ContextBuild),
-            );
-            self.emit_loop_started(&mut trace, &state);
-            state.active_context_snapshot = Some(self.build_context_snapshot(&state, &session));
-            self.emit_context_built(&mut trace, &state);
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ModelRequest),
-            );
-            state.active_model_request = Some(self.build_model_request(&state, &session.config));
-            state.last_model_response = Some(self.request_model(&state));
-            self.emit_model_requested(&mut trace, &state, &session.config);
-            self.emit_model_responded(&mut trace, &state);
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ToolDecision),
-            );
-            state.active_tool_call = self.decide_tool_call(&state);
-            if state.active_tool_call.is_none() {
-                final_response = self.extract_final_response(&state);
-                state.stop_reason = Some(StopReason::FinalResponse);
-            }
-            self.emit_tool_decision(&mut trace, &state);
-
-            if state.active_tool_call.is_none() {
-                self.transition(
-                    &mut state,
-                    RuntimeStatus::Running,
-                    Some(LoopStep::StateUpdate),
-                );
-                state.budget_usage.tokens_estimate += 512;
-                if let Some(snapshot) = &state.active_context_snapshot {
-                    state.budget_usage.tokens_estimate += snapshot.budget_estimate;
-                }
-                state.budget_usage.tool_call_count =
-                    state.observations.len().try_into().unwrap_or(u32::MAX);
-                self.emit_state_updated(&mut trace, &state);
-                break;
-            }
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ToolExecution),
-            );
-            let execution_outcome = self.execute_tool_call(&mut state, &session.config.policy);
-            self.emit_policy_checked(&mut trace, &state);
-            self.emit_tool_completed(&mut trace, &state);
-
-            if matches!(
-                execution_outcome,
-                ToolExecutionOutcome::WaitingApproval | ToolExecutionOutcome::Denied
-            ) {
-                break;
-            }
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::StateUpdate),
-            );
-            state.budget_usage.tokens_estimate += 512;
-            if let Some(snapshot) = &state.active_context_snapshot {
-                state.budget_usage.tokens_estimate += snapshot.budget_estimate;
-            }
-            state.budget_usage.tool_call_count =
-                state.observations.len().try_into().unwrap_or(u32::MAX);
-            self.emit_state_updated(&mut trace, &state);
-        }
+        let final_response = self.run_agent_loop(&session, &mut state, &mut trace, 1);
 
         if state.stop_reason.is_none() && state.pending_approval.is_none() {
             state.stop_reason = Some(StopReason::MaxLoopsReached);
@@ -473,6 +415,7 @@ impl RuntimeCore {
                 .map(|observation| Observation {
                     tool_name: observation.tool_name.clone(),
                     summary: observation.summary.clone(),
+                    content: None,
                 })
                 .collect(),
             policy_decisions: record
@@ -521,17 +464,10 @@ impl RuntimeCore {
             Some(LoopStep::ToolExecution),
         );
         self.emit_policy_checked(&mut trace, &state);
-        self.execute_tool_call_approved(&mut state);
+        self.execute_tool_call(&mut state, None);
         self.emit_tool_completed(&mut trace, &state);
 
-        self.transition(
-            &mut state,
-            RuntimeStatus::Running,
-            Some(LoopStep::StateUpdate),
-        );
-        state.budget_usage.tokens_estimate += 512;
-        state.budget_usage.tool_call_count = state.observations.len().try_into().unwrap_or(u32::MAX);
-        self.emit_state_updated(&mut trace, &state);
+        self.complete_state_update(&mut trace, &mut state);
 
         let config = RuntimeConfig {
             max_loops: record.max_loops,
@@ -554,57 +490,7 @@ impl RuntimeCore {
             config,
         };
 
-        let mut final_response = None;
-        for loop_index in (record.loop_index + 1)..=session.config.max_loops {
-            state.loop_index = loop_index;
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ContextBuild),
-            );
-            self.emit_loop_started(&mut trace, &state);
-            state.active_context_snapshot = Some(self.build_context_snapshot(&state, &session));
-            self.emit_context_built(&mut trace, &state);
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ModelRequest),
-            );
-            state.active_model_request = Some(self.build_model_request(&state, &session.config));
-            state.last_model_response = Some(self.request_model(&state));
-            self.emit_model_requested(&mut trace, &state, &session.config);
-            self.emit_model_responded(&mut trace, &state);
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ToolDecision),
-            );
-            state.active_tool_call = self.decide_tool_call(&state);
-            if state.active_tool_call.is_none() {
-                final_response = self.extract_final_response(&state);
-                state.stop_reason = Some(StopReason::FinalResponse);
-            }
-            self.emit_tool_decision(&mut trace, &state);
-
-            self.transition(
-                &mut state,
-                RuntimeStatus::Running,
-                Some(LoopStep::StateUpdate),
-            );
-            state.budget_usage.tokens_estimate += 512;
-            if let Some(snapshot) = &state.active_context_snapshot {
-                state.budget_usage.tokens_estimate += snapshot.budget_estimate;
-            }
-            state.budget_usage.tool_call_count =
-                state.observations.len().try_into().unwrap_or(u32::MAX);
-            self.emit_state_updated(&mut trace, &state);
-
-            if state.stop_reason.is_some() {
-                break;
-            }
-        }
+        let final_response = self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1);
 
         if state.stop_reason.is_none() {
             state.stop_reason = Some(StopReason::MaxLoopsReached);
@@ -730,6 +616,89 @@ impl RuntimeCore {
     pub fn prune_pending_approvals(&self) -> Result<usize, String> {
         let dir = Path::new(".forgeone").join("sessions");
         prune_json_dir(&dir)
+    }
+
+    fn run_agent_loop(
+        &self,
+        session: &Session,
+        state: &mut RuntimeState,
+        trace: &mut InMemoryTraceStore,
+        start_loop_index: u32,
+    ) -> Option<String> {
+        let mut final_response = None;
+
+        for loop_index in start_loop_index..=session.config.max_loops {
+            state.loop_index = loop_index;
+            self.transition(
+                state,
+                RuntimeStatus::Running,
+                Some(LoopStep::ContextBuild),
+            );
+            self.emit_loop_started(trace, state);
+            state.active_context_snapshot = Some(self.build_context_snapshot(state, session));
+            self.emit_context_built(trace, state);
+
+            self.transition(
+                state,
+                RuntimeStatus::Running,
+                Some(LoopStep::ModelRequest),
+            );
+            state.active_model_request = Some(self.build_model_request(state, &session.config));
+            state.last_model_response = Some(self.request_model(state));
+            self.emit_model_requested(trace, state, &session.config);
+            self.emit_model_responded(trace, state);
+
+            self.transition(
+                state,
+                RuntimeStatus::Running,
+                Some(LoopStep::ToolDecision),
+            );
+            state.active_tool_call = self.decide_tool_call(state);
+            if state.active_tool_call.is_none() {
+                final_response = self.extract_final_response(state);
+                state.stop_reason = Some(StopReason::FinalResponse);
+            }
+            self.emit_tool_decision(trace, state);
+
+            if state.active_tool_call.is_none() {
+                self.complete_state_update(trace, state);
+                break;
+            }
+
+            self.transition(
+                state,
+                RuntimeStatus::Running,
+                Some(LoopStep::ToolExecution),
+            );
+            let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy));
+            self.emit_policy_checked(trace, state);
+            self.emit_tool_completed(trace, state);
+
+            if matches!(execution_outcome, ToolExecutionOutcome::WaitingApproval) {
+                break;
+            }
+
+            self.complete_state_update(trace, state);
+        }
+
+        final_response
+    }
+
+    fn complete_state_update(
+        &self,
+        trace: &mut InMemoryTraceStore,
+        state: &mut RuntimeState,
+    ) {
+        self.transition(
+            state,
+            RuntimeStatus::Running,
+            Some(LoopStep::StateUpdate),
+        );
+        state.budget_usage.tokens_estimate += 512;
+        if let Some(snapshot) = &state.active_context_snapshot {
+            state.budget_usage.tokens_estimate += snapshot.budget_estimate;
+        }
+        self.emit_state_updated(trace, state);
     }
 
     fn transition(&self, state: &mut RuntimeState, status: RuntimeStatus, step: Option<LoopStep>) {
@@ -900,6 +869,15 @@ impl RuntimeCore {
 
     fn build_context_snapshot(&self, state: &RuntimeState, session: &Session) -> ContextSnapshot {
         let engine = DefaultContextEngine;
+        let registry = ToolRegistry::with_builtin_tools();
+        let tool_info: Vec<ToolInfo> = registry
+            .descriptors()
+            .into_iter()
+            .map(|d: ToolDescriptor| ToolInfo {
+                name: d.tool_name,
+                description: d.description,
+            })
+            .collect();
         engine.build(ContextBuildInput {
             session_id: state.session_id.clone(),
             agent_id: state.agent_id.clone(),
@@ -910,7 +888,7 @@ impl RuntimeCore {
                 state.loop_index, state.current_phase, state.status
             )],
             tool_observations: self.to_observation_summaries(&state.observations),
-            system_prompt: "You are ForgeOne, a terminal-first coding agent runtime.".to_string(),
+            system_prompt: SYSTEM_PROMPT.to_string(),
             policy_injections: vec![
                 "Keep context transparent and bounded by budget.".to_string(),
                 "Do not rely on hidden prompt state.".to_string(),
@@ -924,6 +902,7 @@ impl RuntimeCore {
                 ],
             },
             token_budget: session.config.token_budget / 2,
+            tool_descriptors: tool_info,
         })
     }
 
@@ -942,11 +921,56 @@ impl RuntimeCore {
     }
 
     fn request_model(&self, state: &RuntimeState) -> ModelResponse {
-        let adapter = MockModelAdapter;
         let request = state
             .active_model_request
             .as_ref()
             .expect("model request should exist before model adapter call");
+
+        // Dispatch to the appropriate adapter based on model_name prefix.
+        // Format: "openai:gpt-4o" or "ollama:qwen2.5-coder:7b" or "mock" (default).
+        let model_name = &request.model_name;
+        if model_name.starts_with("openai:") {
+            #[cfg(feature = "openai")]
+            {
+                let adapter = forgeone_model_openai::OpenAiModelAdapter::from_env();
+                return adapter.respond(request);
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                return ModelResponse {
+                    response_id: next_model_request_id(),
+                    action: ModelAction::FinalResponse {
+                        content: format!(
+                            "[runtime] openai feature not enabled for model={model_name}"
+                        ),
+                    },
+                    summary: "openai adapter unavailable".to_string(),
+                };
+            }
+        }
+
+        if model_name.starts_with("ollama:") {
+            #[cfg(feature = "ollama")]
+            {
+                let adapter = forgeone_model_ollama::OllamaModelAdapter::from_env();
+                return adapter.respond(request);
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                return ModelResponse {
+                    response_id: next_model_request_id(),
+                    action: ModelAction::FinalResponse {
+                        content: format!(
+                            "[runtime] ollama feature not enabled for model={model_name}"
+                        ),
+                    },
+                    summary: "ollama adapter unavailable".to_string(),
+                };
+            }
+        }
+
+        // Fall back to MockModelAdapter for unknown / test model names
+        let adapter = MockModelAdapter;
         adapter.respond(request)
     }
 
@@ -984,113 +1008,69 @@ impl RuntimeCore {
     fn execute_tool_call(
         &self,
         state: &mut RuntimeState,
-        policy: &PolicyConfig,
+        policy: Option<&PolicyConfig>,
     ) -> ToolExecutionOutcome {
-        let Some(request) = state.active_tool_call.as_ref() else {
+        let Some(request) = state.active_tool_call.clone() else {
             return ToolExecutionOutcome::NoCall;
         };
 
-        let policy_engine = PolicyEngine::new(policy.clone());
-        match policy_engine.check_tool_call(request, state.budget_usage.tool_call_count) {
-            PolicyDecision::Allowed => {
-                state.policy_decisions.push(PolicyRecord {
-                    scope: "tool_call".to_string(),
-                    decision: "allowed".to_string(),
-                    detail: format!("tool={} passed policy checks", request.tool_name),
-                });
-            }
-            PolicyDecision::RequireApproval(approval) => {
-                self.record_approval_required(state, approval);
-                return ToolExecutionOutcome::WaitingApproval;
-            }
-            PolicyDecision::Denied(violation) => {
-                state.policy_decisions.push(PolicyRecord {
-                    scope: "tool_call".to_string(),
-                    decision: "denied".to_string(),
-                    detail: format!("code={} message={}", violation.code, violation.message),
-                });
-                state.last_tool_result = Some(ToolCallResult {
-                    call_id: request.call_id.clone(),
-                    status: forgeone_tools::ToolCallStatus::PermissionDenied,
-                    structured_output: HashMap::new(),
-                    error: Some(violation.message),
-                    completed_at_ms: now_ms(),
-                });
-                return ToolExecutionOutcome::Denied;
+        if let Some(policy) = policy {
+            let policy_engine = PolicyEngine::new(policy.clone());
+            match policy_engine.check_tool_call(&request, state.budget_usage.tool_call_count) {
+                PolicyDecision::Allowed => {
+                    state.policy_decisions.push(PolicyRecord {
+                        scope: "tool_call".to_string(),
+                        decision: "allowed".to_string(),
+                        detail: format!("tool={} passed policy checks", request.tool_name),
+                    });
+                }
+                PolicyDecision::RequireApproval(approval) => {
+                    self.record_approval_required(state, approval);
+                    return ToolExecutionOutcome::WaitingApproval;
+                }
+                PolicyDecision::Denied(violation) => {
+                    state.policy_decisions.push(PolicyRecord {
+                        scope: "tool_call".to_string(),
+                        decision: "denied".to_string(),
+                        detail: format!("code={} message={}", violation.code, violation.message),
+                    });
+                    // Push an observation so the model sees why the call was denied
+                    state.observations.push(Observation {
+                        tool_name: request.tool_name.clone(),
+                        summary: format!(
+                            "tool={} status=denied reason={}",
+                            request.tool_name, violation.message
+                        ),
+                        content: None,
+                    });
+                    state.last_tool_result = Some(ToolCallResult {
+                        call_id: request.call_id.clone(),
+                        status: forgeone_tools::ToolCallStatus::PermissionDenied,
+                        structured_output: HashMap::new(),
+                        error: Some(violation.message),
+                        completed_at_ms: now_ms(),
+                    });
+                    return ToolExecutionOutcome::Denied;
+                }
             }
         }
 
         let registry = ToolRegistry::with_builtin_tools();
-        let result = registry.execute(request);
-        let summary = if let Some(error) = &result.error {
-            format!(
-                "tool={} status={} error={}",
-                request.tool_name, result.status, error
-            )
-        } else {
-            let preview = result
-                .structured_output
-                .get("preview")
-                .map(|preview| preview.lines().next().unwrap_or(""))
-                .unwrap_or("");
-            format!(
-                "tool={} status={} preview={}",
-                request.tool_name, result.status, preview
-            )
-        };
-
-        state.observations.push(Observation {
-            tool_name: request.tool_name.clone(),
-            summary,
-        });
+        let result = registry.execute(&request);
+        let observation = build_observation(&request, &result);
+        state.observations.push(observation);
         state.last_tool_result = Some(result);
+        state.budget_usage.tool_call_count = state.budget_usage.tool_call_count.saturating_add(1);
         ToolExecutionOutcome::Executed
     }
 
-    fn execute_tool_call_approved(&self, state: &mut RuntimeState) {
-        let Some(request) = state.active_tool_call.as_ref() else {
-            return;
-        };
-
-        let registry = ToolRegistry::with_builtin_tools();
-        let result = registry.execute(request);
-        let summary = if let Some(error) = &result.error {
-            format!(
-                "tool={} status={} error={}",
-                request.tool_name, result.status, error
-            )
-        } else {
-            let preview = result
-                .structured_output
-                .get("preview")
-                .map(|preview| preview.lines().next().unwrap_or(""))
-                .unwrap_or("");
-            format!(
-                "tool={} status={} preview={}",
-                request.tool_name, result.status, preview
-            )
-        };
-
-        state.observations.push(Observation {
-            tool_name: request.tool_name.clone(),
-            summary,
-        });
-        state.last_tool_result = Some(result);
-    }
-
     fn to_observation_summaries(&self, observations: &[Observation]) -> Vec<ObservationSummary> {
-        if observations.is_empty() {
-            return vec![ObservationSummary {
-                tool_name: "runtime".to_string(),
-                summary: "no external tool output yet".to_string(),
-            }];
-        }
-
         observations
             .iter()
             .map(|observation| ObservationSummary {
                 tool_name: observation.tool_name.clone(),
                 summary: observation.summary.clone(),
+                content: observation.content.clone(),
             })
             .collect()
     }
@@ -1145,6 +1125,7 @@ impl RuntimeCore {
                 .map(|observation| ApprovalObservationRecord {
                     tool_name: observation.tool_name.clone(),
                     summary: observation.summary.clone(),
+                    content: observation.content.clone(),
                 })
                 .collect(),
             policy_decisions: state
@@ -1300,6 +1281,50 @@ fn next_task_id() -> String {
     format!("task-{counter}")
 }
 
+/// Extract tool output content for observation, using whatever key is available.
+/// Different tools return different keys (preview, files, matches, stdout).
+fn extract_observation_content(output: &HashMap<String, String>) -> Option<String> {
+    // Priority order: the most useful keys for the model
+    for key in &["files", "matches", "preview", "stdout"] {
+        if let Some(value) = output.get(*key) {
+            let truncated: String = value.lines().take(100).collect::<Vec<_>>().join("\n");
+            // Skip if it's just a count line
+            if truncated.len() > 10 {
+                return Some(truncated);
+            }
+        }
+    }
+    None
+}
+
+fn build_observation(request: &ToolCallRequest, result: &ToolCallResult) -> Observation {
+    let summary = if let Some(error) = &result.error {
+        format!(
+            "tool={} status={} error={}",
+            request.tool_name, result.status, error
+        )
+    } else {
+        let preview = result
+            .structured_output
+            .get("preview")
+            .or_else(|| result.structured_output.get("files"))
+            .or_else(|| result.structured_output.get("matches"))
+            .or_else(|| result.structured_output.get("stdout"))
+            .map(|preview| preview.lines().next().unwrap_or(""))
+            .unwrap_or("");
+        format!(
+            "tool={} status={} preview={}",
+            request.tool_name, result.status, preview
+        )
+    };
+
+    Observation {
+        tool_name: request.tool_name.clone(),
+        summary,
+        content: extract_observation_content(&result.structured_output),
+    }
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1339,8 +1364,13 @@ fn prune_json_dir(dir: &Path) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use forgeone_tools::ToolCallRequest;
+
     use super::{
-        LoopStep, RunRequest, RuntimeConfig, RuntimeCore, RuntimePhase, RuntimeStatus, StopReason,
+        LoopStep, RunRequest, RuntimeConfig, RuntimeCore, RuntimePhase, RuntimeState,
+        RuntimeStatus, StopReason,
     };
 
     #[test]
@@ -1406,5 +1436,70 @@ mod tests {
         assert_eq!(LoopStep::ModelRequest.phase(), RuntimePhase::ModelRequest);
         assert_eq!(LoopStep::ToolDecision.phase(), RuntimePhase::ToolDecision);
         assert_eq!(LoopStep::StateUpdate.phase(), RuntimePhase::StateUpdate);
+    }
+
+    #[test]
+    fn denied_tool_call_does_not_consume_execution_budget() {
+        let core = RuntimeCore;
+        let mut config = RuntimeConfig::default();
+        config.policy.max_tool_calls = 1;
+
+        let mut state = build_test_state("search_files", [("pattern", "Cargo.toml"), ("path", "/etc")]);
+        let outcome = core.execute_tool_call(&mut state, Some(&config.policy));
+
+        assert!(matches!(outcome, super::ToolExecutionOutcome::Denied));
+        assert_eq!(state.budget_usage.tool_call_count, 0);
+        assert_eq!(state.observations.len(), 1);
+        assert!(state
+            .last_tool_result
+            .as_ref()
+            .is_some_and(|result| result.status == forgeone_tools::ToolCallStatus::PermissionDenied));
+    }
+
+    #[test]
+    fn empty_observations_do_not_inject_placeholder_summary() {
+        let core = RuntimeCore;
+        let summaries = core.to_observation_summaries(&[]);
+        assert!(summaries.is_empty());
+    }
+
+    fn build_test_state<const N: usize>(
+        tool_name: &str,
+        arguments: [(&str, &str); N],
+    ) -> RuntimeState {
+        let arguments = HashMap::from_iter(
+            arguments
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        );
+
+        RuntimeState {
+            session_id: "session-test".to_string(),
+            task_id: "task-test".to_string(),
+            agent_id: "agent-test".to_string(),
+            parent_agent_id: None,
+            loop_index: 1,
+            status: RuntimeStatus::Running,
+            current_phase: RuntimePhase::ToolDecision,
+            active_step: Some(LoopStep::ToolDecision),
+            active_context_snapshot: None,
+            active_model_request: None,
+            last_model_response: None,
+            active_tool_call: Some(ToolCallRequest {
+                call_id: "tool-call-test".to_string(),
+                session_id: "session-test".to_string(),
+                agent_id: "agent-test".to_string(),
+                loop_index: 1,
+                tool_name: tool_name.to_string(),
+                arguments,
+                requested_by: "model".to_string(),
+            }),
+            last_tool_result: None,
+            observations: Vec::new(),
+            policy_decisions: Vec::new(),
+            pending_approval: None,
+            budget_usage: super::BudgetUsage::default(),
+            stop_reason: None,
+        }
     }
 }

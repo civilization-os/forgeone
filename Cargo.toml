@@ -3,8 +3,11 @@ members = [
     "crates/forgeone-cli",
     "crates/forgeone-context",
     "crates/forgeone-model",
+    "crates/forgeone-model-openai",
+    "crates/forgeone-model-ollama",
     "crates/forgeone-policy",
     "crates/forgeone-runtime",
+    "crates/forgeone-tui",
     "crates/forgeone-tools",
     "crates/forgeone-trace",
 ]

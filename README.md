@@ -154,6 +154,7 @@ CLI 的设计原则：
 - [docs/runtime.md](/root/project/ai/forgeone/docs/runtime.md)
 - [docs/context-engine.md](/root/project/ai/forgeone/docs/context-engine.md)
 - [docs/tool-runtime.md](/root/project/ai/forgeone/docs/tool-runtime.md)
+- [docs/tui-design.md](/root/project/ai/forgeone/docs/tui-design.md)
 - [docs/plugin-system.md](/root/project/ai/forgeone/docs/plugin-system.md)
 - [docs/mcp-integration.md](/root/project/ai/forgeone/docs/mcp-integration.md)
 - [docs/cli-design.md](/root/project/ai/forgeone/docs/cli-design.md)

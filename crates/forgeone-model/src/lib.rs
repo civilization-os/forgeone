@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use forgeone_context::PromptMessage;
+pub use forgeone_context::PromptMessage;
 
 static RESPONSE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -109,9 +109,7 @@ fn next_response_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use forgeone_context::PromptMessage;
-
-    use super::{MockModelAdapter, ModelAction, ModelAdapter, ModelRequest, next_model_request_id};
+    use super::{MockModelAdapter, ModelAction, ModelAdapter, ModelRequest, PromptMessage, next_model_request_id};
 
     #[test]
     fn mock_model_requests_tool_before_observation() {
