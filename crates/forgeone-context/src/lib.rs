@@ -8,6 +8,25 @@ static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static COMPRESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextLayer {
+    GoalAnchor,
+    WorkingSet,
+    EvidenceBuffer,
+    ArchiveSummary,
+}
+
+impl fmt::Display for ContextLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GoalAnchor => write!(f, "goal_anchor"),
+            Self::WorkingSet => write!(f, "working_set"),
+            Self::EvidenceBuffer => write!(f, "evidence_buffer"),
+            Self::ArchiveSummary => write!(f, "archive_summary"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextSourceType {
     TaskInput,
     SessionHistory,
@@ -15,6 +34,7 @@ pub enum ContextSourceType {
     SystemPrompt,
     PolicyInjection,
     WorkingMemory,
+    WorkingSet,
 }
 
 impl fmt::Display for ContextSourceType {
@@ -26,6 +46,7 @@ impl fmt::Display for ContextSourceType {
             Self::SystemPrompt => write!(f, "system_prompt"),
             Self::PolicyInjection => write!(f, "policy_injection"),
             Self::WorkingMemory => write!(f, "working_memory"),
+            Self::WorkingSet => write!(f, "working_set"),
         }
     }
 }
@@ -34,6 +55,7 @@ impl fmt::Display for ContextSourceType {
 pub enum CompressionStrategy {
     Truncate,
     DropLowPriority,
+    MergeSummary,
 }
 
 impl fmt::Display for CompressionStrategy {
@@ -41,6 +63,7 @@ impl fmt::Display for CompressionStrategy {
         match self {
             Self::Truncate => write!(f, "truncate"),
             Self::DropLowPriority => write!(f, "drop_low_priority"),
+            Self::MergeSummary => write!(f, "merge_summary"),
         }
     }
 }
@@ -49,6 +72,7 @@ impl fmt::Display for CompressionStrategy {
 pub struct ContextSource {
     pub source_id: String,
     pub source_type: ContextSourceType,
+    pub layer: ContextLayer,
     pub label: String,
     pub content: String,
     pub priority: u8,
@@ -58,6 +82,7 @@ pub struct ContextSource {
 pub struct SelectedSegment {
     pub segment_id: String,
     pub source_id: String,
+    pub layer: ContextLayer,
     pub content: String,
     pub selection_reason: String,
     pub token_estimate: u32,
@@ -68,8 +93,16 @@ pub struct SelectedSegment {
 pub struct CompressionEvent {
     pub event_id: String,
     pub source_id: String,
+    pub layer: ContextLayer,
     pub strategy: CompressionStrategy,
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextLayerState {
+    pub layer: ContextLayer,
+    pub segment_refs: Vec<String>,
+    pub token_estimate: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +136,38 @@ impl WorkingMemory {
         format!(
             "current_goal: {}\ncompleted: {}\npending: {}",
             self.current_goal, completed, pending
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkingSet {
+    pub active_files: Vec<String>,
+    pub active_subtasks: Vec<String>,
+    pub open_questions: Vec<String>,
+}
+
+impl WorkingSet {
+    pub fn to_source_content(&self) -> String {
+        let files = if self.active_files.is_empty() {
+            "none".to_string()
+        } else {
+            self.active_files.join("; ")
+        };
+        let subtasks = if self.active_subtasks.is_empty() {
+            "none".to_string()
+        } else {
+            self.active_subtasks.join("; ")
+        };
+        let questions = if self.open_questions.is_empty() {
+            "none".to_string()
+        } else {
+            self.open_questions.join("; ")
+        };
+
+        format!(
+            "active_files: {}\nactive_subtasks: {}\nopen_questions: {}",
+            files, subtasks, questions
         )
     }
 }
@@ -161,6 +226,7 @@ pub struct ContextBuildInput {
     pub system_prompt: String,
     pub policy_injections: Vec<String>,
     pub working_memory: WorkingMemory,
+    pub working_set: WorkingSet,
     pub token_budget: u32,
     pub tool_descriptors: Vec<ToolInfo>,
 }
@@ -174,6 +240,7 @@ pub struct ContextSnapshot {
     pub sources: Vec<ContextSource>,
     pub selected_segments: Vec<SelectedSegment>,
     pub compression_events: Vec<CompressionEvent>,
+    pub layers: Vec<ContextLayerState>,
     pub prompt_messages: Vec<PromptMessage>,
     pub budget: ContextBudget,
     pub budget_estimate: u32,
@@ -181,11 +248,18 @@ pub struct ContextSnapshot {
 
 impl ContextSnapshot {
     pub fn summary(&self) -> String {
+        let layer_summary = self
+            .layers
+            .iter()
+            .map(|layer| format!("{}={}", layer.layer, layer.segment_refs.len()))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "snapshot_id={} sources={} segments={} messages={} budget_estimate={}",
+            "snapshot_id={} sources={} segments={} layers=[{}] messages={} budget_estimate={}",
             self.snapshot_id,
             self.sources.len(),
             self.selected_segments.len(),
+            layer_summary,
             self.prompt_messages.len(),
             self.budget_estimate
         )
@@ -221,12 +295,14 @@ impl ContextEngine for DefaultContextEngine {
         sources.push(ContextSource {
             source_id: next_source_id(),
             source_type: ContextSourceType::SystemPrompt,
+            layer: ContextLayer::GoalAnchor,
             label: "system_prompt".to_string(),
             content: truncate_with_budget(
                 &system_content,
                 budget.reserved_system_tokens,
                 &mut compression_events,
                 "system_prompt",
+                ContextLayer::GoalAnchor,
             ),
             priority: 100,
         });
@@ -234,6 +310,7 @@ impl ContextEngine for DefaultContextEngine {
         sources.push(ContextSource {
             source_id: next_source_id(),
             source_type: ContextSourceType::TaskInput,
+            layer: ContextLayer::GoalAnchor,
             label: "task_input".to_string(),
             content: input.task_input,
             priority: 100,
@@ -242,44 +319,100 @@ impl ContextEngine for DefaultContextEngine {
         sources.push(ContextSource {
             source_id: next_source_id(),
             source_type: ContextSourceType::WorkingMemory,
+            layer: ContextLayer::WorkingSet,
             label: "working_memory".to_string(),
             content: truncate_with_budget(
                 &input.working_memory.to_source_content(),
                 budget.reserved_working_memory_tokens,
                 &mut compression_events,
                 "working_memory",
+                ContextLayer::WorkingSet,
             ),
             priority: 95,
+        });
+
+        sources.push(ContextSource {
+            source_id: next_source_id(),
+            source_type: ContextSourceType::WorkingSet,
+            layer: ContextLayer::WorkingSet,
+            label: "working_set".to_string(),
+            content: truncate_with_budget(
+                &input.working_set.to_source_content(),
+                budget.reserved_working_memory_tokens,
+                &mut compression_events,
+                "working_set",
+                ContextLayer::WorkingSet,
+            ),
+            priority: 92,
         });
 
         for (index, injection) in input.policy_injections.iter().enumerate() {
             sources.push(ContextSource {
                 source_id: next_source_id(),
                 source_type: ContextSourceType::PolicyInjection,
+                layer: ContextLayer::GoalAnchor,
                 label: format!("policy_injection_{index}"),
                 content: injection.clone(),
                 priority: 90,
             });
         }
 
-        for (index, history) in input.session_history.iter().rev().take(2).enumerate() {
+        let recent_history: Vec<&String> = input.session_history.iter().rev().take(2).collect();
+        for (index, history) in recent_history.iter().enumerate() {
             sources.push(ContextSource {
                 source_id: next_source_id(),
                 source_type: ContextSourceType::SessionHistory,
+                layer: ContextLayer::ArchiveSummary,
                 label: format!("recent_history_{index}"),
                 content: truncate_with_budget(
                     history,
                     budget.reserved_recent_tokens / 2,
                     &mut compression_events,
                     "session_history",
+                    ContextLayer::ArchiveSummary,
                 ),
-                priority: 70,
+                priority: 60,
             });
         }
 
-        // Recent observations first, capped at 10 for safety. Budget truncation
-        // (via truncate_with_budget) is the primary capacity control.
-        for (index, observation) in input.tool_observations.iter().rev().take(10).enumerate() {
+        if input.session_history.len() > recent_history.len() {
+            let merged_history = input
+                .session_history
+                .iter()
+                .take(input.session_history.len() - recent_history.len())
+                .rev()
+                .take(4)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let content = format!(
+                "older_history_summary: {} previous entries compressed; recent topics: {}",
+                input.session_history.len() - recent_history.len(),
+                merged_history
+            );
+            sources.push(ContextSource {
+                source_id: next_source_id(),
+                source_type: ContextSourceType::SessionHistory,
+                layer: ContextLayer::ArchiveSummary,
+                label: "older_history_summary".to_string(),
+                content,
+                priority: 45,
+            });
+            compression_events.push(CompressionEvent {
+                event_id: next_compression_id(),
+                source_id: "older_history_summary".to_string(),
+                layer: ContextLayer::ArchiveSummary,
+                strategy: CompressionStrategy::MergeSummary,
+                reason: format!(
+                    "compressed_history_entries={}",
+                    input.session_history.len() - recent_history.len()
+                ),
+            });
+        }
+
+        let recent_observations: Vec<&ObservationSummary> =
+            input.tool_observations.iter().rev().take(2).collect();
+        for (index, observation) in recent_observations.iter().enumerate() {
             let content = if let Some(output) = &observation.content {
                 format!(
                     "## Tool Result: {}\n\n{}\n\n```\n{}\n```",
@@ -294,14 +427,50 @@ impl ContextEngine for DefaultContextEngine {
             sources.push(ContextSource {
                 source_id: next_source_id(),
                 source_type: ContextSourceType::ToolObservation,
+                layer: ContextLayer::EvidenceBuffer,
                 label: format!("tool_observation_{}", index),
                 content: truncate_with_budget(
                     &content,
                     budget.reserved_observation_tokens / 2,
                     &mut compression_events,
                     "tool_observation",
+                    ContextLayer::EvidenceBuffer,
                 ),
                 priority: 75,
+            });
+        }
+
+        if input.tool_observations.len() > recent_observations.len() {
+            let merged_observations = input
+                .tool_observations
+                .iter()
+                .take(input.tool_observations.len() - recent_observations.len())
+                .rev()
+                .take(4)
+                .map(|observation| format!("{}: {}", observation.tool_name, observation.summary))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            sources.push(ContextSource {
+                source_id: next_source_id(),
+                source_type: ContextSourceType::ToolObservation,
+                layer: ContextLayer::ArchiveSummary,
+                label: "older_observation_summary".to_string(),
+                content: format!(
+                    "older_observation_summary: {} prior observations compressed; highlights: {}",
+                    input.tool_observations.len() - recent_observations.len(),
+                    merged_observations
+                ),
+                priority: 50,
+            });
+            compression_events.push(CompressionEvent {
+                event_id: next_compression_id(),
+                source_id: "older_observation_summary".to_string(),
+                layer: ContextLayer::ArchiveSummary,
+                strategy: CompressionStrategy::MergeSummary,
+                reason: format!(
+                    "compressed_observations={}",
+                    input.tool_observations.len() - recent_observations.len()
+                ),
             });
         }
 
@@ -310,6 +479,7 @@ impl ContextEngine for DefaultContextEngine {
             selected_segments.push(SelectedSegment {
                 segment_id: next_segment_id(),
                 source_id: source.source_id.clone(),
+                layer: source.layer,
                 content: source.content.clone(),
                 selection_reason: selection_reason(source.source_type).to_string(),
                 token_estimate: estimate_tokens(&source.content),
@@ -317,7 +487,8 @@ impl ContextEngine for DefaultContextEngine {
             });
         }
 
-        let prompt_messages = assemble_messages(&selected_segments);
+        let layers = build_layer_states(&selected_segments);
+        let prompt_messages = assemble_messages(&selected_segments, &layers);
         let budget_estimate = prompt_messages
             .iter()
             .map(|message| estimate_tokens(&message.content))
@@ -331,6 +502,7 @@ impl ContextEngine for DefaultContextEngine {
             sources,
             selected_segments,
             compression_events,
+            layers,
             prompt_messages,
             budget,
             budget_estimate,
@@ -338,15 +510,48 @@ impl ContextEngine for DefaultContextEngine {
     }
 }
 
-fn assemble_messages(selected_segments: &[SelectedSegment]) -> Vec<PromptMessage> {
+fn build_layer_states(selected_segments: &[SelectedSegment]) -> Vec<ContextLayerState> {
+    let ordered_layers = [
+        ContextLayer::GoalAnchor,
+        ContextLayer::WorkingSet,
+        ContextLayer::EvidenceBuffer,
+        ContextLayer::ArchiveSummary,
+    ];
+    ordered_layers
+        .into_iter()
+        .map(|layer| {
+            let layer_segments = selected_segments
+                .iter()
+                .filter(|segment| segment.layer == layer)
+                .collect::<Vec<_>>();
+            ContextLayerState {
+                layer,
+                segment_refs: layer_segments
+                    .iter()
+                    .map(|segment| segment.segment_id.clone())
+                    .collect(),
+                token_estimate: layer_segments
+                    .iter()
+                    .map(|segment| segment.token_estimate)
+                    .sum(),
+            }
+        })
+        .collect()
+}
+
+fn assemble_messages(
+    selected_segments: &[SelectedSegment],
+    layers: &[ContextLayerState],
+) -> Vec<PromptMessage> {
     let mut system_segments = Vec::new();
     let mut user_segments = Vec::new();
 
     for segment in selected_segments {
-        if segment.priority >= 90 {
-            system_segments.push(segment);
-        } else {
-            user_segments.push(segment);
+        match segment.layer {
+            ContextLayer::GoalAnchor => system_segments.push(segment),
+            ContextLayer::WorkingSet
+            | ContextLayer::EvidenceBuffer
+            | ContextLayer::ArchiveSummary => user_segments.push(segment),
         }
     }
 
@@ -368,14 +573,24 @@ fn assemble_messages(selected_segments: &[SelectedSegment]) -> Vec<PromptMessage
     }
 
     if !user_segments.is_empty() {
+        let layer_header = layers
+            .iter()
+            .filter(|layer| layer.layer != ContextLayer::GoalAnchor && !layer.segment_refs.is_empty())
+            .map(|layer| format!("{} tokens={}", layer.layer, layer.token_estimate))
+            .collect::<Vec<_>>()
+            .join("\n");
         messages.push(PromptMessage {
             message_id: next_message_id(),
             role: "user".to_string(),
-            content: user_segments
-                .iter()
-                .map(|segment| segment.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
+            content: format!(
+                "## Context Layers\n{}\n\n{}",
+                layer_header,
+                user_segments
+                    .iter()
+                    .map(|segment| segment.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            ),
             source_segment_refs: user_segments
                 .iter()
                 .map(|segment| segment.segment_id.clone())
@@ -391,6 +606,7 @@ fn truncate_with_budget(
     token_budget: u32,
     compression_events: &mut Vec<CompressionEvent>,
     label: &str,
+    layer: ContextLayer,
 ) -> String {
     let estimated = estimate_tokens(content);
     if estimated <= token_budget {
@@ -402,6 +618,7 @@ fn truncate_with_budget(
     compression_events.push(CompressionEvent {
         event_id: next_compression_id(),
         source_id: label.to_string(),
+        layer,
         strategy: CompressionStrategy::Truncate,
         reason: format!(
             "estimated_tokens={} exceeds_budget={}",
@@ -419,6 +636,7 @@ fn selection_reason(source_type: ContextSourceType) -> &'static str {
         ContextSourceType::SystemPrompt => "system prompt anchors runtime policy",
         ContextSourceType::PolicyInjection => "policy injection must be explicit",
         ContextSourceType::WorkingMemory => "working memory keeps current progress stable",
+        ContextSourceType::WorkingSet => "working set keeps active files and subtasks in focus",
     }
 }
 
@@ -458,7 +676,8 @@ fn next_compression_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextBuildInput, ContextEngine, DefaultContextEngine, ObservationSummary, WorkingMemory,
+        ContextBuildInput, ContextEngine, ContextLayer, DefaultContextEngine, ObservationSummary,
+        WorkingMemory, WorkingSet,
     };
 
     #[test]
@@ -482,6 +701,11 @@ mod tests {
                 completed_items: vec!["trace fields added".to_string()],
                 pending_items: vec!["build context snapshot".to_string()],
             },
+            working_set: WorkingSet {
+                active_files: vec!["crates/forgeone-runtime/src/lib.rs".to_string()],
+                active_subtasks: vec!["build context snapshot".to_string()],
+                open_questions: vec!["which tool to call next".to_string()],
+            },
             token_budget: 128,
             tool_descriptors: vec![],
         });
@@ -489,6 +713,7 @@ mod tests {
         assert_eq!(snapshot.loop_index, 1);
         assert!(!snapshot.sources.is_empty());
         assert!(!snapshot.selected_segments.is_empty());
+        assert!(!snapshot.layers.is_empty());
         assert!(!snapshot.prompt_messages.is_empty());
         assert!(
             snapshot
@@ -496,6 +721,10 @@ mod tests {
                 .iter()
                 .any(|source| source.label == "working_memory")
         );
+        assert!(snapshot
+            .sources
+            .iter()
+            .any(|source| source.label == "working_set"));
     }
 
     #[test]
@@ -514,6 +743,11 @@ mod tests {
                 current_goal: "list files".to_string(),
                 completed_items: vec![],
                 pending_items: vec![],
+            },
+            working_set: WorkingSet {
+                active_files: vec![],
+                active_subtasks: vec!["inspect workspace".to_string()],
+                open_questions: vec![],
             },
             token_budget: 1024,
             tool_descriptors: vec![
@@ -537,5 +771,65 @@ mod tests {
         assert!(system_msg.content.contains("read_file"));
         assert!(system_msg.content.contains("search_content"));
         assert!(system_msg.content.contains("Available Tools"));
+    }
+
+    #[test]
+    fn context_builds_layered_summary_for_older_history_and_observations() {
+        let engine = DefaultContextEngine;
+        let snapshot = engine.build(ContextBuildInput {
+            session_id: "session-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            loop_index: 3,
+            task_input: "continue task".to_string(),
+            session_history: vec![
+                "history-1".to_string(),
+                "history-2".to_string(),
+                "history-3".to_string(),
+                "history-4".to_string(),
+            ],
+            tool_observations: vec![
+                ObservationSummary {
+                    tool_name: "read_file".to_string(),
+                    summary: "obs-1".to_string(),
+                    content: None,
+                },
+                ObservationSummary {
+                    tool_name: "search_content".to_string(),
+                    summary: "obs-2".to_string(),
+                    content: None,
+                },
+                ObservationSummary {
+                    tool_name: "shell".to_string(),
+                    summary: "obs-3".to_string(),
+                    content: None,
+                },
+            ],
+            system_prompt: "you are a coding agent".to_string(),
+            policy_injections: vec![],
+            working_memory: WorkingMemory {
+                current_goal: "continue task".to_string(),
+                completed_items: vec![],
+                pending_items: vec!["decide next step".to_string()],
+            },
+            working_set: WorkingSet {
+                active_files: vec!["src/lib.rs".to_string()],
+                active_subtasks: vec!["continue task".to_string()],
+                open_questions: vec!["what changed last round".to_string()],
+            },
+            token_budget: 512,
+            tool_descriptors: vec![],
+        });
+
+        assert!(snapshot.sources.iter().any(|source| {
+            source.label == "older_history_summary" && source.layer == ContextLayer::ArchiveSummary
+        }));
+        assert!(snapshot.sources.iter().any(|source| {
+            source.label == "older_observation_summary"
+                && source.layer == ContextLayer::ArchiveSummary
+        }));
+        assert!(snapshot
+            .compression_events
+            .iter()
+            .any(|event| event.strategy == super::CompressionStrategy::MergeSummary));
     }
 }

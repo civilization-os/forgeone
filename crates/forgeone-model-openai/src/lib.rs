@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use forgeone_model::{ModelAction, ModelAdapter, ModelRequest, ModelResponse};
+use forgeone_model::{
+    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate,
+    ModelResponse,
+};
 
 /// OpenAI-compatible model adapter.
 ///
@@ -47,6 +50,40 @@ impl OpenAiModelAdapter {
 }
 
 impl ModelAdapter for OpenAiModelAdapter {
+    fn capabilities(&self, model_name: &str) -> ModelCapabilities {
+        let normalized = model_name.to_ascii_lowercase();
+        if normalized.contains("gpt-4.1") {
+            return ModelCapabilities {
+                context_window: 1_000_000,
+                reserved_output_tokens: 32_000,
+            };
+        }
+        if normalized.contains("gpt-4o-mini") {
+            return ModelCapabilities {
+                context_window: 128_000,
+                reserved_output_tokens: 12_000,
+            };
+        }
+        ModelCapabilities {
+            context_window: 128_000,
+            reserved_output_tokens: 16_000,
+        }
+    }
+
+    fn estimate(&self, request: &ModelRequest) -> ModelRequestEstimate {
+        let caps = self.capabilities(&request.model_name);
+        let message_overhead = request.messages.len() as u32 * 12;
+        let total_expected_tokens = request
+            .prompt_token_estimate
+            .saturating_add(message_overhead)
+            .saturating_add(caps.reserved_output_tokens);
+        ModelRequestEstimate {
+            prompt_tokens: request.prompt_token_estimate.saturating_add(message_overhead),
+            total_expected_tokens,
+            within_context_window: total_expected_tokens <= caps.context_window,
+        }
+    }
+
     fn respond(&self, request: &ModelRequest) -> ModelResponse {
         let response_id = format!("openai-{}", chrono_id());
         let payload = build_payload(request, &self.model);
@@ -203,7 +240,7 @@ fn chrono_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgeone_model::next_model_request_id;
+    use forgeone_model::{ModelAdapter, next_model_request_id};
     use forgeone_model::PromptMessage;
 
     #[test]
@@ -267,6 +304,7 @@ mod tests {
                 },
             ],
             prompt_token_estimate: 10,
+            context_window: 128_000,
         };
 
         let payload = build_payload(&request, "gpt-4o-mini");
@@ -274,5 +312,28 @@ mod tests {
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
         assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(payload["messages"][1]["content"], "Hello");
+    }
+
+    #[test]
+    fn openai_adapter_reports_capabilities_and_estimate() {
+        let adapter = OpenAiModelAdapter::new("", "gpt-4o", "https://api.openai.com/v1");
+        let request = ModelRequest {
+            request_id: next_model_request_id(),
+            model_name: "openai:gpt-4o".to_string(),
+            messages: vec![PromptMessage {
+                message_id: "m1".to_string(),
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                source_segment_refs: vec![],
+            }],
+            prompt_token_estimate: 20,
+            context_window: 128_000,
+        };
+
+        let caps = adapter.capabilities(&request.model_name);
+        let estimate = adapter.estimate(&request);
+        assert!(caps.context_window >= 128_000);
+        assert!(estimate.within_context_window);
+        assert!(estimate.total_expected_tokens > estimate.prompt_tokens);
     }
 }

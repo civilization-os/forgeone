@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use forgeone_context::{
-    ContextBuildInput, ContextEngine, ContextSnapshot, DefaultContextEngine, ObservationSummary,
-    ToolInfo, WorkingMemory,
+    ContextBuildInput, ContextEngine, ContextLayer, ContextSnapshot, DefaultContextEngine,
+    ObservationSummary, ToolInfo, WorkingMemory, WorkingSet,
 };
 use forgeone_model::{
-    MockModelAdapter, ModelAction, ModelAdapter, ModelRequest, ModelResponse, next_model_request_id,
+    MockModelAdapter, ModelAction, ModelAdapter, ModelCapabilities, ModelRequest,
+    ModelRequestEstimate, ModelResponse, next_model_request_id,
 };
 use forgeone_policy::{ApprovalRequest, PolicyConfig, PolicyDecision, PolicyEngine};
 use forgeone_tools::{
@@ -878,32 +879,286 @@ impl RuntimeCore {
                 description: d.description,
             })
             .collect();
+        let working_set = self.build_working_set(state);
+        let model_capabilities = self.model_capabilities_for(&session.config.model_name);
+        let context_token_budget = std::cmp::min(
+            session.config.token_budget / 2,
+            model_capabilities.input_budget() / 2,
+        )
+        .max(512);
         engine.build(ContextBuildInput {
             session_id: state.session_id.clone(),
             agent_id: state.agent_id.clone(),
             loop_index: state.loop_index,
             task_input: session.task.input.clone(),
-            session_history: vec![format!(
-                "loop={} phase={} status={}",
-                state.loop_index, state.current_phase, state.status
-            )],
+            session_history: self.build_session_history(state),
             tool_observations: self.to_observation_summaries(&state.observations),
             system_prompt: SYSTEM_PROMPT.to_string(),
-            policy_injections: vec![
-                "Keep context transparent and bounded by budget.".to_string(),
-                "Do not rely on hidden prompt state.".to_string(),
-            ],
-            working_memory: WorkingMemory {
-                current_goal: session.task.input.clone(),
-                completed_items: vec!["task received".to_string()],
-                pending_items: vec![
-                    "produce model request".to_string(),
-                    "decide next action".to_string(),
-                ],
-            },
-            token_budget: session.config.token_budget / 2,
-            tool_descriptors: tool_info,
+            policy_injections: self.build_policy_injections(state),
+            working_memory: self.build_working_memory(state, session),
+            working_set: working_set.clone(),
+            token_budget: context_token_budget,
+            tool_descriptors: self.select_tool_descriptors(state, &working_set, tool_info),
         })
+    }
+
+    fn build_session_history(&self, state: &RuntimeState) -> Vec<String> {
+        let mut history = Vec::new();
+        history.push(format!(
+            "loop={} phase={} status={}",
+            state.loop_index, state.current_phase, state.status
+        ));
+
+        if let Some(response) = &state.last_model_response {
+            history.push(format!("last_model_response={}", response.summary));
+        }
+
+        if let Some(result) = &state.last_tool_result {
+            history.push(format!("last_tool_result={}", result.summary()));
+        }
+
+        if let Some(policy) = state.policy_decisions.last() {
+            history.push(format!(
+                "last_policy_decision scope={} decision={} detail={}",
+                policy.scope, policy.decision, policy.detail
+            ));
+        }
+
+        if let Some(snapshot) = &state.active_context_snapshot {
+            let archive_segments = snapshot
+                .selected_segments
+                .iter()
+                .filter(|segment| segment.layer == ContextLayer::ArchiveSummary)
+                .map(|segment| segment.content.as_str())
+                .take(2)
+                .collect::<Vec<_>>();
+            if !archive_segments.is_empty() {
+                history.push(format!(
+                    "archive_summary_reused={}",
+                    archive_segments.join(" | ")
+                ));
+            }
+        }
+
+        history
+    }
+
+    fn build_policy_injections(&self, state: &RuntimeState) -> Vec<String> {
+        let mut injections = vec![
+            "Keep context transparent and bounded by budget.".to_string(),
+            "Do not rely on hidden prompt state.".to_string(),
+            "Prefer goal anchor and working set over archive summary when reasoning.".to_string(),
+            "If context grows, compress old history and stale observations before expanding active context.".to_string(),
+        ];
+
+        if let Some(snapshot) = &state.active_context_snapshot {
+            let archive_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::ArchiveSummary)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            let working_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::WorkingSet)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            injections.push(format!(
+                "Previous context balance: working_set_tokens={} archive_summary_tokens={}.",
+                working_tokens, archive_tokens
+            ));
+        }
+
+        injections
+    }
+
+    fn build_working_memory(&self, state: &RuntimeState, session: &Session) -> WorkingMemory {
+        let mut completed_items = vec!["task received".to_string()];
+        if !state.observations.is_empty() {
+            completed_items.extend(
+                state
+                    .observations
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|observation| format!("observed {}", observation.tool_name)),
+            );
+        }
+        if let Some(result) = &state.last_tool_result {
+            completed_items.push(format!("latest tool result {}", result.status));
+        }
+
+        let mut pending_items = Vec::new();
+        if let Some(call) = &state.active_tool_call {
+            pending_items.push(format!("resolve tool call {}", call.tool_name));
+        } else {
+            pending_items.push("produce model request".to_string());
+            pending_items.push("decide next action".to_string());
+        }
+        if state.pending_approval.is_some() {
+            pending_items.push("await approval before continuing".to_string());
+        }
+        if let Some(snapshot) = &state.active_context_snapshot {
+            let archive_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::ArchiveSummary)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            let working_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::WorkingSet)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            if archive_tokens > working_tokens {
+                pending_items.push("recenter context toward active working set".to_string());
+            }
+        }
+
+        WorkingMemory {
+            current_goal: session.task.input.clone(),
+            completed_items,
+            pending_items,
+        }
+    }
+
+    fn build_working_set(&self, state: &RuntimeState) -> WorkingSet {
+        let mut active_files = Vec::new();
+        let mut active_subtasks = Vec::new();
+        let mut open_questions = Vec::new();
+
+        if let Some(call) = &state.active_tool_call {
+            active_subtasks.push(format!("resolve tool call {}", call.tool_name));
+            if let Some(path) = call.arguments.get("path") {
+                active_files.push(path.clone());
+            }
+        }
+
+        if let Some(result) = &state.last_tool_result
+            && let Some(path) = result.structured_output.get("path")
+            && !active_files.iter().any(|file| file == path)
+        {
+            active_files.push(path.clone());
+        }
+
+        for observation in state.observations.iter().rev().take(2) {
+            if observation.tool_name == "read_file" || observation.tool_name == "write_file" {
+                if let Some(content) = &observation.content {
+                    if content.contains('/') {
+                        let candidate = content.lines().next().unwrap_or("").trim().to_string();
+                        if !candidate.is_empty() && !active_files.iter().any(|file| file == &candidate)
+                        {
+                            active_files.push(candidate);
+                        }
+                    }
+                }
+            }
+            active_subtasks.push(format!("analyze {}", observation.tool_name));
+        }
+
+        if let Some(response) = &state.last_model_response {
+            open_questions.push(format!("model intent: {}", response.summary));
+        } else {
+            open_questions.push("determine next high-value action".to_string());
+        }
+
+        if let Some(policy) = state.policy_decisions.last()
+            && policy.decision == "denied"
+        {
+            open_questions.push(format!("work around denied action: {}", policy.detail));
+        }
+
+        if state.pending_approval.is_some() {
+            open_questions.push("approval boundary is blocking active work".to_string());
+        }
+
+        dedupe_keep_order(&mut active_files);
+        dedupe_keep_order(&mut active_subtasks);
+        dedupe_keep_order(&mut open_questions);
+
+        WorkingSet {
+            active_files,
+            active_subtasks,
+            open_questions,
+        }
+    }
+
+    fn select_tool_descriptors(
+        &self,
+        state: &RuntimeState,
+        working_set: &WorkingSet,
+        tool_info: Vec<ToolInfo>,
+    ) -> Vec<ToolInfo> {
+        let mut selected = Vec::new();
+        let mut desired_names = Vec::new();
+
+        if let Some(active_tool_call) = &state.active_tool_call
+        {
+            desired_names.push(active_tool_call.tool_name.clone());
+        }
+
+        if !working_set.active_files.is_empty() {
+            desired_names.push("read_file".to_string());
+        }
+
+        for subtask in &working_set.active_subtasks {
+            let normalized = subtask.to_ascii_lowercase();
+            if normalized.contains("file") || normalized.contains("read") {
+                desired_names.push("read_file".to_string());
+            }
+            if normalized.contains("search") || normalized.contains("find") {
+                desired_names.push("search_files".to_string());
+                desired_names.push("search_content".to_string());
+            }
+            if normalized.contains("write") || normalized.contains("edit") || normalized.contains("patch")
+            {
+                desired_names.push("write_file".to_string());
+            }
+            if normalized.contains("run") || normalized.contains("test") || normalized.contains("command")
+            {
+                desired_names.push("shell".to_string());
+            }
+        }
+
+        for question in &working_set.open_questions {
+            let normalized = question.to_ascii_lowercase();
+            if normalized.contains("intent") || normalized.contains("next high-value action") {
+                desired_names.push("read_file".to_string());
+                desired_names.push("search_content".to_string());
+            }
+            if normalized.contains("denied action") || normalized.contains("work around") {
+                desired_names.push("search_files".to_string());
+                desired_names.push("shell".to_string());
+            }
+            if normalized.contains("approval") {
+                desired_names.push("read_file".to_string());
+            }
+        }
+
+        dedupe_keep_order(&mut desired_names);
+
+        for desired_name in desired_names {
+            if let Some(matched) = tool_info.iter().find(|tool| tool.name == desired_name) {
+                selected.push(matched.clone());
+            }
+            if selected.len() >= 4 {
+                break;
+            }
+        }
+
+        for tool in tool_info {
+            if selected.len() >= 4 {
+                break;
+            }
+            if selected.iter().any(|selected_tool| selected_tool.name == tool.name) {
+                continue;
+            }
+            selected.push(tool);
+        }
+
+        selected
     }
 
     fn build_model_request(&self, state: &RuntimeState, config: &RuntimeConfig) -> ModelRequest {
@@ -911,13 +1166,71 @@ impl RuntimeCore {
             .active_context_snapshot
             .as_ref()
             .expect("context snapshot should exist before model request");
+        let model_capabilities = self.model_capabilities_for(&config.model_name);
 
         ModelRequest {
             request_id: next_model_request_id(),
             model_name: config.model_name.clone(),
             messages: snapshot.prompt_messages.clone(),
             prompt_token_estimate: snapshot.budget_estimate,
+            context_window: model_capabilities.context_window,
         }
+    }
+
+    fn model_capabilities_for(&self, model_name: &str) -> ModelCapabilities {
+        if model_name.starts_with("openai:") {
+            #[cfg(feature = "openai")]
+            {
+                let adapter = forgeone_model_openai::OpenAiModelAdapter::new("", "", "");
+                return adapter.capabilities(model_name);
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                return MockModelAdapter.capabilities(model_name);
+            }
+        }
+
+        if model_name.starts_with("ollama:") {
+            #[cfg(feature = "ollama")]
+            {
+                let adapter = forgeone_model_ollama::OllamaModelAdapter::new("");
+                return adapter.capabilities(model_name);
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                return MockModelAdapter.capabilities(model_name);
+            }
+        }
+
+        MockModelAdapter.capabilities(model_name)
+    }
+
+    fn estimate_model_request(&self, request: &ModelRequest) -> ModelRequestEstimate {
+        if request.model_name.starts_with("openai:") {
+            #[cfg(feature = "openai")]
+            {
+                let adapter = forgeone_model_openai::OpenAiModelAdapter::new("", "", "");
+                return adapter.estimate(request);
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                return MockModelAdapter.estimate(request);
+            }
+        }
+
+        if request.model_name.starts_with("ollama:") {
+            #[cfg(feature = "ollama")]
+            {
+                let adapter = forgeone_model_ollama::OllamaModelAdapter::new("");
+                return adapter.estimate(request);
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                return MockModelAdapter.estimate(request);
+            }
+        }
+
+        MockModelAdapter.estimate(request)
     }
 
     fn request_model(&self, state: &RuntimeState) -> ModelResponse {
@@ -925,6 +1238,7 @@ impl RuntimeCore {
             .active_model_request
             .as_ref()
             .expect("model request should exist before model adapter call");
+        let _estimate = self.estimate_model_request(request);
 
         // Dispatch to the appropriate adapter based on model_name prefix.
         // Format: "openai:gpt-4o" or "ollama:qwen2.5-coder:7b" or "mock" (default).
@@ -941,7 +1255,8 @@ impl RuntimeCore {
                     response_id: next_model_request_id(),
                     action: ModelAction::FinalResponse {
                         content: format!(
-                            "[runtime] openai feature not enabled for model={model_name}"
+                            "[runtime] openai feature not enabled for model={model_name} estimate_total_tokens={}",
+                            _estimate.total_expected_tokens
                         ),
                     },
                     summary: "openai adapter unavailable".to_string(),
@@ -961,7 +1276,8 @@ impl RuntimeCore {
                     response_id: next_model_request_id(),
                     action: ModelAction::FinalResponse {
                         content: format!(
-                            "[runtime] ollama feature not enabled for model={model_name}"
+                            "[runtime] ollama feature not enabled for model={model_name} estimate_total_tokens={}",
+                            _estimate.total_expected_tokens
                         ),
                     },
                     summary: "ollama adapter unavailable".to_string(),
@@ -1325,6 +1641,11 @@ fn build_observation(request: &ToolCallRequest, result: &ToolCallResult) -> Obse
     }
 }
 
+fn dedupe_keep_order(items: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.clone()));
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1372,6 +1693,7 @@ mod tests {
         LoopStep, RunRequest, RuntimeConfig, RuntimeCore, RuntimePhase, RuntimeState,
         RuntimeStatus, StopReason,
     };
+    use forgeone_context::WorkingSet;
 
     #[test]
     fn runtime_emits_final_response_and_trace() {
@@ -1461,6 +1783,119 @@ mod tests {
         let core = RuntimeCore;
         let summaries = core.to_observation_summaries(&[]);
         assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn runtime_builds_explicit_working_set() {
+        let core = RuntimeCore;
+        let mut state = build_test_state(
+            "read_file",
+            [("path", "crates/forgeone-runtime/src/lib.rs")],
+        );
+        state.last_tool_result = Some(forgeone_tools::ToolCallResult {
+            call_id: "tool-call-previous".to_string(),
+            status: forgeone_tools::ToolCallStatus::Success,
+            structured_output: HashMap::from([(
+                "path".to_string(),
+                "crates/forgeone-context/src/lib.rs".to_string(),
+            )]),
+            error: None,
+            completed_at_ms: 0,
+        });
+
+        let working_set = core.build_working_set(&state);
+        assert!(working_set
+            .active_files
+            .iter()
+            .any(|file| file == "crates/forgeone-runtime/src/lib.rs"));
+        assert!(working_set
+            .active_files
+            .iter()
+            .any(|file| file == "crates/forgeone-context/src/lib.rs"));
+        assert!(working_set
+            .active_subtasks
+            .iter()
+            .any(|task| task.contains("resolve tool call read_file")));
+        assert!(!working_set.open_questions.is_empty());
+    }
+
+    #[test]
+    fn runtime_selects_tool_descriptors_from_working_set() {
+        let core = RuntimeCore;
+        let state = build_test_state(
+            "search_content",
+            [("pattern", "RuntimeState"), ("path", "crates/")],
+        );
+        let working_set = WorkingSet {
+            active_files: vec!["crates/forgeone-runtime/src/lib.rs".to_string()],
+            active_subtasks: vec![
+                "search runtime state transitions".to_string(),
+                "run targeted command".to_string(),
+            ],
+            open_questions: vec!["work around denied action".to_string()],
+        };
+        let descriptors = core.select_tool_descriptors(
+            &state,
+            &working_set,
+            vec![
+                forgeone_context::ToolInfo {
+                    name: "read_file".to_string(),
+                    description: "Read a file".to_string(),
+                },
+                forgeone_context::ToolInfo {
+                    name: "search_content".to_string(),
+                    description: "Search content".to_string(),
+                },
+                forgeone_context::ToolInfo {
+                    name: "search_files".to_string(),
+                    description: "Search files".to_string(),
+                },
+                forgeone_context::ToolInfo {
+                    name: "shell".to_string(),
+                    description: "Run shell".to_string(),
+                },
+                forgeone_context::ToolInfo {
+                    name: "write_file".to_string(),
+                    description: "Write file".to_string(),
+                },
+            ],
+        );
+
+        let names = descriptors
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.first().copied(), Some("search_content"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"search_files"));
+        assert!(names.contains(&"shell"));
+        assert!(descriptors.len() <= 4);
+    }
+
+    #[test]
+    fn runtime_builds_model_request_with_provider_context_window() {
+        let core = RuntimeCore;
+        let mut state = build_test_state(
+            "read_file",
+            [("path", "crates/forgeone-runtime/src/lib.rs")],
+        );
+        let session = super::Session {
+            session_id: "session-test".to_string(),
+            task: super::Task {
+                task_id: "task-test".to_string(),
+                input: "inspect runtime".to_string(),
+            },
+            config: RuntimeConfig {
+                model_name: "openai:gpt-4o".to_string(),
+                ..RuntimeConfig::default()
+            },
+        };
+
+        state.active_context_snapshot = Some(core.build_context_snapshot(&state, &session));
+        let request = core.build_model_request(&state, &session.config);
+
+        assert_eq!(request.context_window, 128_000);
+        assert!(request.prompt_token_estimate > 0);
     }
 
     fn build_test_state<const N: usize>(
