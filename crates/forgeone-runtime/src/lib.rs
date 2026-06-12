@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,11 +12,14 @@ use forgeone_model::{
     ModelRequestEstimate, ModelResponse, next_model_request_id,
 };
 use forgeone_policy::{ApprovalRequest, PolicyConfig, PolicyDecision, PolicyEngine};
+pub use forgeone_session::{
+    ApprovalObservationRecord, ApprovalPendingRecord, ApprovalPolicyRecord, ApprovalSessionRecord,
+    ApprovalToolCallRecord, FileSessionStore, SessionStore, SessionTraceRecord,
+};
 use forgeone_tools::{
     Observation, ToolCallRequest, ToolCallResult, ToolDescriptor, ToolRegistry, next_tool_call_id,
 };
 use forgeone_trace::{InMemoryTraceStore, TraceEvent, TraceEventKind};
-use serde::{Deserialize, Serialize};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -206,6 +207,7 @@ pub struct RuntimeState {
     pub last_model_response: Option<ModelResponse>,
     pub active_tool_call: Option<ToolCallRequest>,
     pub last_tool_result: Option<ToolCallResult>,
+    pub last_executed_tool_signature: Option<String>,
     pub observations: Vec<Observation>,
     pub policy_decisions: Vec<PolicyRecord>,
     pub pending_approval: Option<PendingApproval>,
@@ -220,80 +222,26 @@ pub struct RunResult {
     pub trace: Vec<TraceEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalSessionRecord {
-    pub session_id: String,
-    pub task_id: String,
-    pub task_input: String,
-    pub agent_id: String,
-    pub loop_index: u32,
-    pub max_loops: u32,
-    pub token_budget: u32,
-    pub model_name: String,
-    pub allowed_tools: Vec<String>,
-    pub read_roots: Vec<String>,
-    pub approval_read_roots: Vec<String>,
-    pub max_tool_calls: u32,
-    pub tokens_estimate: u32,
-    pub tool_call_count: u32,
-    pub observations: Vec<ApprovalObservationRecord>,
-    pub policy_decisions: Vec<ApprovalPolicyRecord>,
-    pub active_tool_call: ApprovalToolCallRecord,
-    pub pending_approval: ApprovalPendingRecord,
+#[derive(Debug, Clone)]
+pub struct RuntimeCore<S = FileSessionStore> {
+    session_store: S,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionTraceRecord {
-    pub session_id: String,
-    pub task_id: String,
-    pub task_input: String,
-    pub agent_id: String,
-    pub status: String,
-    pub current_phase: String,
-    pub loop_index: u32,
-    pub stop_reason: String,
-    pub final_response: String,
-    pub approval_required: bool,
-    pub pending_approval: Option<ApprovalPendingRecord>,
-    pub token_budget: u32,
-    pub tokens_estimate: u32,
-    pub tool_call_count: u32,
-    pub trace: Vec<TraceEvent>,
+impl Default for RuntimeCore<FileSessionStore> {
+    fn default() -> Self {
+        Self {
+            session_store: FileSessionStore,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalObservationRecord {
-    pub tool_name: String,
-    pub summary: String,
-    pub content: Option<String>,
+impl<S> RuntimeCore<S> {
+    pub fn with_session_store(session_store: S) -> Self {
+        Self { session_store }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalPolicyRecord {
-    pub scope: String,
-    pub decision: String,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalToolCallRecord {
-    pub call_id: String,
-    pub tool_name: String,
-    pub requested_by: String,
-    pub arguments: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalPendingRecord {
-    pub tool_name: String,
-    pub reason: String,
-    pub argument_summary: String,
-}
-
-#[derive(Debug, Default)]
-pub struct RuntimeCore;
-
-impl RuntimeCore {
+impl<S: SessionStore> RuntimeCore<S> {
     pub fn run(&self, request: RunRequest) -> RunResult {
         let session = Session::new(request);
         let agent_id = next_agent_id();
@@ -325,6 +273,7 @@ impl RuntimeCore {
             last_model_response: None,
             active_tool_call: None,
             last_tool_result: None,
+            last_executed_tool_signature: None,
             observations: Vec::new(),
             policy_decisions: Vec::new(),
             pending_approval: None,
@@ -378,7 +327,11 @@ impl RuntimeCore {
             final_response,
             trace: trace_events,
         };
-        let trace_record = self.build_session_trace_record(&result, &session.task.input, session.config.token_budget);
+        let trace_record = self.build_session_trace_record(
+            &result,
+            &session.task.input,
+            session.config.token_budget,
+        );
         self.save_session_trace(&trace_record)
             .expect("failed to save session trace");
         result
@@ -410,6 +363,7 @@ impl RuntimeCore {
                 requested_by: record.active_tool_call.requested_by.clone(),
             }),
             last_tool_result: None,
+            last_executed_tool_signature: record.last_executed_tool_signature.clone(),
             observations: record
                 .observations
                 .iter()
@@ -491,7 +445,8 @@ impl RuntimeCore {
             config,
         };
 
-        let final_response = self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1);
+        let final_response =
+            self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1);
 
         if state.stop_reason.is_none() {
             state.stop_reason = Some(StopReason::MaxLoopsReached);
@@ -532,8 +487,11 @@ impl RuntimeCore {
             final_response,
             trace: trace.into_events(),
         };
-        let trace_record =
-            self.build_session_trace_record(&result, &session.task.input, session.config.token_budget);
+        let trace_record = self.build_session_trace_record(
+            &result,
+            &session.task.input,
+            session.config.token_budget,
+        );
         self.save_session_trace(&trace_record)
             .map_err(|error| format!("failed to save session trace: {error}"))?;
 
@@ -544,19 +502,19 @@ impl RuntimeCore {
         &self,
         session_id: &str,
     ) -> Result<ApprovalSessionRecord, String> {
-        self.load_approval_session(session_id)
+        self.session_store.inspect_approval_session(session_id)
     }
 
     pub fn inspect_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String> {
-        self.load_session_trace(session_id)
+        self.session_store.inspect_session_trace(session_id)
     }
 
     pub fn resume_session(&self, session_id: &str) -> Result<RunResult, String> {
-        if approval_session_path(session_id).exists() {
+        if self.session_store.pending_approval_exists(session_id) {
             return self.approve_session(session_id);
         }
 
-        let trace = self.load_session_trace(session_id)?;
+        let trace = self.session_store.load_session_trace(session_id)?;
         Err(format!(
             "session {} is not resumable in the current runtime: status={} stop_reason={}",
             session_id, trace.status, trace.stop_reason
@@ -564,59 +522,19 @@ impl RuntimeCore {
     }
 
     pub fn list_session_traces(&self) -> Result<Vec<SessionTraceRecord>, String> {
-        let mut records = Vec::new();
-        let dir = Path::new(".forgeone").join("traces");
-        if !dir.exists() {
-            return Ok(records);
-        }
-
-        for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let payload = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            let record =
-                serde_json::from_str::<SessionTraceRecord>(&payload).map_err(|error| error.to_string())?;
-            records.push(record);
-        }
-
-        records.sort_by(|a, b| b.session_id.cmp(&a.session_id));
-        Ok(records)
+        self.session_store.list_session_traces()
     }
 
     pub fn list_pending_approvals(&self) -> Result<Vec<ApprovalSessionRecord>, String> {
-        let mut records = Vec::new();
-        let dir = Path::new(".forgeone").join("sessions");
-        if !dir.exists() {
-            return Ok(records);
-        }
-
-        for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let payload = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            let record = serde_json::from_str::<ApprovalSessionRecord>(&payload)
-                .map_err(|error| error.to_string())?;
-            records.push(record);
-        }
-
-        records.sort_by(|a, b| b.session_id.cmp(&a.session_id));
-        Ok(records)
+        self.session_store.list_pending_approvals()
     }
 
     pub fn prune_session_traces(&self) -> Result<usize, String> {
-        let dir = Path::new(".forgeone").join("traces");
-        prune_json_dir(&dir)
+        self.session_store.prune_session_traces()
     }
 
     pub fn prune_pending_approvals(&self) -> Result<usize, String> {
-        let dir = Path::new(".forgeone").join("sessions");
-        prune_json_dir(&dir)
+        self.session_store.prune_pending_approvals()
     }
 
     fn run_agent_loop(
@@ -630,47 +548,76 @@ impl RuntimeCore {
 
         for loop_index in start_loop_index..=session.config.max_loops {
             state.loop_index = loop_index;
-            self.transition(
-                state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ContextBuild),
-            );
+            self.transition(state, RuntimeStatus::Running, Some(LoopStep::ContextBuild));
             self.emit_loop_started(trace, state);
             state.active_context_snapshot = Some(self.build_context_snapshot(state, session));
             self.emit_context_built(trace, state);
 
-            self.transition(
-                state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ModelRequest),
-            );
+            self.transition(state, RuntimeStatus::Running, Some(LoopStep::ModelRequest));
             state.active_model_request = Some(self.build_model_request(state, &session.config));
             state.last_model_response = Some(self.request_model(state));
             self.emit_model_requested(trace, state, &session.config);
             self.emit_model_responded(trace, state);
 
-            self.transition(
-                state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ToolDecision),
-            );
+            self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolDecision));
             state.active_tool_call = self.decide_tool_call(state);
+            if let Some(request) = state.active_tool_call.clone() {
+                if self.is_repeated_tool_call(state, &request) {
+                    let detail = format!(
+                        "tool={} arguments={} repeats the most recent successful tool call",
+                        request.tool_name,
+                        summarize_tool_arguments(&request.arguments)
+                    );
+                    state.policy_decisions.push(PolicyRecord {
+                        scope: "tool_call".to_string(),
+                        decision: "duplicate_blocked".to_string(),
+                        detail: detail.clone(),
+                    });
+                    state.observations.push(Observation {
+                        tool_name: request.tool_name.clone(),
+                        summary: format!(
+                            "tool={} status=blocked reason=repeated_tool_call",
+                            request.tool_name
+                        ),
+                        content: Some(detail.clone()),
+                    });
+                    state.last_tool_result = Some(ToolCallResult {
+                        call_id: request.call_id.clone(),
+                        status: forgeone_tools::ToolCallStatus::PermissionDenied,
+                        structured_output: HashMap::from([
+                            ("reason".to_string(), "repeated_tool_call".to_string()),
+                            (
+                                "detail".to_string(),
+                                "Reuse the prior observation or choose another tool before retrying."
+                                    .to_string(),
+                            ),
+                        ]),
+                        error: Some(detail.clone()),
+                        completed_at_ms: now_ms(),
+                    });
+                    state.active_tool_call = None;
+                    final_response = Some(format!(
+                        "[runtime] stopped repeated tool call {} with identical arguments; reuse the prior observation or choose a different action.",
+                        request.tool_name
+                    ));
+                    state.stop_reason = Some(StopReason::FinalResponse);
+                }
+            }
             if state.active_tool_call.is_none() {
-                final_response = self.extract_final_response(state);
+                if final_response.is_none() {
+                    final_response = self.extract_final_response(state);
+                }
                 state.stop_reason = Some(StopReason::FinalResponse);
             }
             self.emit_tool_decision(trace, state);
 
             if state.active_tool_call.is_none() {
+                self.emit_policy_checked(trace, state);
                 self.complete_state_update(trace, state);
                 break;
             }
 
-            self.transition(
-                state,
-                RuntimeStatus::Running,
-                Some(LoopStep::ToolExecution),
-            );
+            self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolExecution));
             let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy));
             self.emit_policy_checked(trace, state);
             self.emit_tool_completed(trace, state);
@@ -685,16 +632,8 @@ impl RuntimeCore {
         final_response
     }
 
-    fn complete_state_update(
-        &self,
-        trace: &mut InMemoryTraceStore,
-        state: &mut RuntimeState,
-    ) {
-        self.transition(
-            state,
-            RuntimeStatus::Running,
-            Some(LoopStep::StateUpdate),
-        );
+    fn complete_state_update(&self, trace: &mut InMemoryTraceStore, state: &mut RuntimeState) {
+        self.transition(state, RuntimeStatus::Running, Some(LoopStep::StateUpdate));
         state.budget_usage.tokens_estimate += 512;
         if let Some(snapshot) = &state.active_context_snapshot {
             state.budget_usage.tokens_estimate += snapshot.budget_estimate;
@@ -1048,7 +987,8 @@ impl RuntimeCore {
                 if let Some(content) = &observation.content {
                     if content.contains('/') {
                         let candidate = content.lines().next().unwrap_or("").trim().to_string();
-                        if !candidate.is_empty() && !active_files.iter().any(|file| file == &candidate)
+                        if !candidate.is_empty()
+                            && !active_files.iter().any(|file| file == &candidate)
                         {
                             active_files.push(candidate);
                         }
@@ -1094,8 +1034,7 @@ impl RuntimeCore {
         let mut selected = Vec::new();
         let mut desired_names = Vec::new();
 
-        if let Some(active_tool_call) = &state.active_tool_call
-        {
+        if let Some(active_tool_call) = &state.active_tool_call {
             desired_names.push(active_tool_call.tool_name.clone());
         }
 
@@ -1112,11 +1051,15 @@ impl RuntimeCore {
                 desired_names.push("search_files".to_string());
                 desired_names.push("search_content".to_string());
             }
-            if normalized.contains("write") || normalized.contains("edit") || normalized.contains("patch")
+            if normalized.contains("write")
+                || normalized.contains("edit")
+                || normalized.contains("patch")
             {
                 desired_names.push("write_file".to_string());
             }
-            if normalized.contains("run") || normalized.contains("test") || normalized.contains("command")
+            if normalized.contains("run")
+                || normalized.contains("test")
+                || normalized.contains("command")
             {
                 desired_names.push("shell".to_string());
             }
@@ -1152,7 +1095,10 @@ impl RuntimeCore {
             if selected.len() >= 4 {
                 break;
             }
-            if selected.iter().any(|selected_tool| selected_tool.name == tool.name) {
+            if selected
+                .iter()
+                .any(|selected_tool| selected_tool.name == tool.name)
+            {
                 continue;
             }
             selected.push(tool);
@@ -1246,8 +1192,20 @@ impl RuntimeCore {
         if model_name.starts_with("openai:") {
             #[cfg(feature = "openai")]
             {
-                let adapter = forgeone_model_openai::OpenAiModelAdapter::from_env();
-                return adapter.respond(request);
+                match forgeone_model_openai::OpenAiModelAdapter::from_env() {
+                    Ok(adapter) => return adapter.respond(request),
+                    Err(error) => {
+                        return ModelResponse {
+                            response_id: next_model_request_id(),
+                            action: ModelAction::FinalResponse {
+                                content: format!(
+                                    "[runtime] openai adapter unavailable for model={model_name}: {error}"
+                                ),
+                            },
+                            summary: format!("openai adapter unavailable: {error}"),
+                        };
+                    }
+                }
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -1376,8 +1334,16 @@ impl RuntimeCore {
         let observation = build_observation(&request, &result);
         state.observations.push(observation);
         state.last_tool_result = Some(result);
+        state.last_executed_tool_signature = Some(tool_call_signature(&request));
         state.budget_usage.tool_call_count = state.budget_usage.tool_call_count.saturating_add(1);
         ToolExecutionOutcome::Executed
+    }
+
+    fn is_repeated_tool_call(&self, state: &RuntimeState, request: &ToolCallRequest) -> bool {
+        let Some(last_signature) = state.last_executed_tool_signature.as_ref() else {
+            return false;
+        };
+        tool_call_signature(request) == *last_signature
     }
 
     fn to_observation_summaries(&self, observations: &[Observation]) -> Vec<ObservationSummary> {
@@ -1435,6 +1401,7 @@ impl RuntimeCore {
             max_tool_calls: session.config.policy.max_tool_calls,
             tokens_estimate: state.budget_usage.tokens_estimate,
             tool_call_count: state.budget_usage.tool_call_count,
+            last_executed_tool_signature: state.last_executed_tool_signature.clone(),
             observations: state
                 .observations
                 .iter()
@@ -1468,28 +1435,15 @@ impl RuntimeCore {
     }
 
     fn save_approval_session(&self, record: &ApprovalSessionRecord) -> Result<(), String> {
-        let path = approval_session_path(&record.session_id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let payload = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
-        fs::write(path, payload).map_err(|error| error.to_string())
+        self.session_store.save_approval_session(record)
     }
 
     fn load_approval_session(&self, session_id: &str) -> Result<ApprovalSessionRecord, String> {
-        let path = approval_session_path(session_id);
-        let payload = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read session {}: {}", session_id, error))?;
-        serde_json::from_str(&payload)
-            .map_err(|error| format!("failed to parse session {}: {}", session_id, error))
+        self.session_store.load_approval_session(session_id)
     }
 
     fn delete_approval_session(&self, session_id: &str) -> Result<(), String> {
-        let path = approval_session_path(session_id);
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
-        }
-        Ok(())
+        self.session_store.delete_approval_session(session_id)
     }
 
     fn build_session_trace_record(
@@ -1514,15 +1468,13 @@ impl RuntimeCore {
                 .unwrap_or_else(|| "unknown".to_string()),
             final_response: result.final_response.clone(),
             approval_required: result.state.pending_approval.is_some(),
-            pending_approval: result
-                .state
-                .pending_approval
-                .as_ref()
-                .map(|approval| ApprovalPendingRecord {
+            pending_approval: result.state.pending_approval.as_ref().map(|approval| {
+                ApprovalPendingRecord {
                     tool_name: approval.tool_name.clone(),
                     reason: approval.reason.clone(),
                     argument_summary: approval.argument_summary.clone(),
-                }),
+                }
+            }),
             token_budget,
             tokens_estimate: result.state.budget_usage.tokens_estimate,
             tool_call_count: result.state.budget_usage.tool_call_count,
@@ -1531,20 +1483,7 @@ impl RuntimeCore {
     }
 
     fn save_session_trace(&self, record: &SessionTraceRecord) -> Result<(), String> {
-        let path = session_trace_path(&record.session_id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let payload = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
-        fs::write(path, payload).map_err(|error| error.to_string())
-    }
-
-    fn load_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String> {
-        let path = session_trace_path(session_id);
-        let payload = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read trace {}: {}", session_id, error))?;
-        serde_json::from_str(&payload)
-            .map_err(|error| format!("failed to parse trace {}: {}", session_id, error))
+        self.session_store.save_session_trace(record)
     }
 }
 
@@ -1641,6 +1580,31 @@ fn build_observation(request: &ToolCallRequest, result: &ToolCallResult) -> Obse
     }
 }
 
+fn tool_call_signature(request: &ToolCallRequest) -> String {
+    let mut arguments = request
+        .arguments
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    arguments.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+    let rendered_args = arguments
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}|{}", request.tool_name, rendered_args)
+}
+
+fn summarize_tool_arguments(arguments: &HashMap<String, String>) -> String {
+    let mut pairs = arguments.iter().collect::<Vec<_>>();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn dedupe_keep_order(items: &mut Vec<String>) {
     let mut seen = std::collections::HashSet::new();
     items.retain(|item| seen.insert(item.clone()));
@@ -1653,40 +1617,12 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn approval_session_path(session_id: &str) -> PathBuf {
-    Path::new(".forgeone")
-        .join("sessions")
-        .join(format!("{session_id}.json"))
-}
-
-fn session_trace_path(session_id: &str) -> PathBuf {
-    Path::new(".forgeone")
-        .join("traces")
-        .join(format!("{session_id}.json"))
-}
-
-fn prune_json_dir(dir: &Path) -> Result<usize, String> {
-    if !dir.exists() {
-        return Ok(0);
-    }
-
-    let mut deleted = 0usize;
-    for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
+    use forgeone_session::{ApprovalSessionRecord, SessionStore, SessionTraceRecord};
     use forgeone_tools::ToolCallRequest;
 
     use super::{
@@ -1697,7 +1633,7 @@ mod tests {
 
     #[test]
     fn runtime_emits_final_response_and_trace() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let result = core.run(RunRequest {
             task: "inspect repo".to_string(),
             config: RuntimeConfig::default(),
@@ -1730,12 +1666,14 @@ mod tests {
         assert_eq!(result.state.active_step, None);
         assert!(result.state.budget_usage.tokens_estimate >= 512);
         assert!(result.state.budget_usage.tool_call_count >= 1);
+        assert!(result.state.last_executed_tool_signature.is_some());
         assert!(result.trace.len() >= 12);
     }
 
     #[test]
     fn runtime_can_enter_waiting_approval() {
-        let core = RuntimeCore;
+        let store = RecordingSessionStore::default();
+        let core = RuntimeCore::with_session_store(store.clone());
         let mut config = RuntimeConfig::default();
         config.policy.approval_read_roots = vec!["crates/".to_string()];
 
@@ -1750,6 +1688,8 @@ mod tests {
         );
         assert!(result.state.pending_approval.is_some());
         assert!(result.state.last_tool_result.is_none());
+        assert_eq!(store.saved_approvals(), 1);
+        assert_eq!(store.saved_traces(), 1);
     }
 
     #[test]
@@ -1762,32 +1702,34 @@ mod tests {
 
     #[test]
     fn denied_tool_call_does_not_consume_execution_budget() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let mut config = RuntimeConfig::default();
         config.policy.max_tool_calls = 1;
 
-        let mut state = build_test_state("search_files", [("pattern", "Cargo.toml"), ("path", "/etc")]);
+        let mut state = build_test_state(
+            "search_files",
+            [("pattern", "Cargo.toml"), ("path", "/etc")],
+        );
         let outcome = core.execute_tool_call(&mut state, Some(&config.policy));
 
         assert!(matches!(outcome, super::ToolExecutionOutcome::Denied));
         assert_eq!(state.budget_usage.tool_call_count, 0);
         assert_eq!(state.observations.len(), 1);
-        assert!(state
-            .last_tool_result
-            .as_ref()
-            .is_some_and(|result| result.status == forgeone_tools::ToolCallStatus::PermissionDenied));
+        assert!(state.last_tool_result.as_ref().is_some_and(
+            |result| result.status == forgeone_tools::ToolCallStatus::PermissionDenied
+        ));
     }
 
     #[test]
     fn empty_observations_do_not_inject_placeholder_summary() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let summaries = core.to_observation_summaries(&[]);
         assert!(summaries.is_empty());
     }
 
     #[test]
     fn runtime_builds_explicit_working_set() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let mut state = build_test_state(
             "read_file",
             [("path", "crates/forgeone-runtime/src/lib.rs")],
@@ -1804,24 +1746,30 @@ mod tests {
         });
 
         let working_set = core.build_working_set(&state);
-        assert!(working_set
-            .active_files
-            .iter()
-            .any(|file| file == "crates/forgeone-runtime/src/lib.rs"));
-        assert!(working_set
-            .active_files
-            .iter()
-            .any(|file| file == "crates/forgeone-context/src/lib.rs"));
-        assert!(working_set
-            .active_subtasks
-            .iter()
-            .any(|task| task.contains("resolve tool call read_file")));
+        assert!(
+            working_set
+                .active_files
+                .iter()
+                .any(|file| file == "crates/forgeone-runtime/src/lib.rs")
+        );
+        assert!(
+            working_set
+                .active_files
+                .iter()
+                .any(|file| file == "crates/forgeone-context/src/lib.rs")
+        );
+        assert!(
+            working_set
+                .active_subtasks
+                .iter()
+                .any(|task| task.contains("resolve tool call read_file"))
+        );
         assert!(!working_set.open_questions.is_empty());
     }
 
     #[test]
     fn runtime_selects_tool_descriptors_from_working_set() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let state = build_test_state(
             "search_content",
             [("pattern", "RuntimeState"), ("path", "crates/")],
@@ -1874,7 +1822,7 @@ mod tests {
 
     #[test]
     fn runtime_builds_model_request_with_provider_context_window() {
-        let core = RuntimeCore;
+        let core = RuntimeCore::default();
         let mut state = build_test_state(
             "read_file",
             [("path", "crates/forgeone-runtime/src/lib.rs")],
@@ -1930,11 +1878,142 @@ mod tests {
                 requested_by: "model".to_string(),
             }),
             last_tool_result: None,
+            last_executed_tool_signature: None,
             observations: Vec::new(),
             policy_decisions: Vec::new(),
             pending_approval: None,
             budget_usage: super::BudgetUsage::default(),
             stop_reason: None,
+        }
+    }
+
+    #[test]
+    fn runtime_blocks_repeated_tool_call_with_same_arguments() {
+        let core = RuntimeCore::default();
+        let mut state = build_test_state(
+            "read_file",
+            [("path", "crates/forgeone-runtime/src/lib.rs")],
+        );
+        state.last_executed_tool_signature = Some(super::tool_call_signature(
+            state
+                .active_tool_call
+                .as_ref()
+                .expect("tool call should exist"),
+        ));
+
+        assert!(
+            core.is_repeated_tool_call(
+                &state,
+                state
+                    .active_tool_call
+                    .as_ref()
+                    .expect("tool call should exist"),
+            )
+        );
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct RecordingSessionStore {
+        approvals: Arc<Mutex<Vec<ApprovalSessionRecord>>>,
+        traces: Arc<Mutex<Vec<SessionTraceRecord>>>,
+    }
+
+    impl RecordingSessionStore {
+        fn saved_approvals(&self) -> usize {
+            self.approvals.lock().expect("approvals should lock").len()
+        }
+
+        fn saved_traces(&self) -> usize {
+            self.traces.lock().expect("traces should lock").len()
+        }
+    }
+
+    impl SessionStore for RecordingSessionStore {
+        fn save_approval_session(&self, record: &ApprovalSessionRecord) -> Result<(), String> {
+            self.approvals
+                .lock()
+                .expect("approvals should lock")
+                .push(record.clone());
+            Ok(())
+        }
+
+        fn load_approval_session(&self, session_id: &str) -> Result<ApprovalSessionRecord, String> {
+            self.inspect_approval_session(session_id)
+        }
+
+        fn delete_approval_session(&self, session_id: &str) -> Result<(), String> {
+            let mut approvals = self.approvals.lock().expect("approvals should lock");
+            approvals.retain(|record| record.session_id != session_id);
+            Ok(())
+        }
+
+        fn inspect_approval_session(
+            &self,
+            session_id: &str,
+        ) -> Result<ApprovalSessionRecord, String> {
+            self.approvals
+                .lock()
+                .expect("approvals should lock")
+                .iter()
+                .find(|record| record.session_id == session_id)
+                .cloned()
+                .ok_or_else(|| format!("missing approval session {session_id}"))
+        }
+
+        fn list_pending_approvals(&self) -> Result<Vec<ApprovalSessionRecord>, String> {
+            Ok(self
+                .approvals
+                .lock()
+                .expect("approvals should lock")
+                .clone())
+        }
+
+        fn prune_pending_approvals(&self) -> Result<usize, String> {
+            let mut approvals = self.approvals.lock().expect("approvals should lock");
+            let deleted = approvals.len();
+            approvals.clear();
+            Ok(deleted)
+        }
+
+        fn pending_approval_exists(&self, session_id: &str) -> bool {
+            self.approvals
+                .lock()
+                .expect("approvals should lock")
+                .iter()
+                .any(|record| record.session_id == session_id)
+        }
+
+        fn save_session_trace(&self, record: &SessionTraceRecord) -> Result<(), String> {
+            self.traces
+                .lock()
+                .expect("traces should lock")
+                .push(record.clone());
+            Ok(())
+        }
+
+        fn load_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String> {
+            self.inspect_session_trace(session_id)
+        }
+
+        fn inspect_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String> {
+            self.traces
+                .lock()
+                .expect("traces should lock")
+                .iter()
+                .find(|record| record.session_id == session_id)
+                .cloned()
+                .ok_or_else(|| format!("missing session trace {session_id}"))
+        }
+
+        fn list_session_traces(&self) -> Result<Vec<SessionTraceRecord>, String> {
+            Ok(self.traces.lock().expect("traces should lock").clone())
+        }
+
+        fn prune_session_traces(&self) -> Result<usize, String> {
+            let mut traces = self.traces.lock().expect("traces should lock");
+            let deleted = traces.len();
+            traces.clear();
+            Ok(deleted)
         }
     }
 }

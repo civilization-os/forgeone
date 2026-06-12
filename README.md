@@ -107,6 +107,10 @@ forgeone trace show session_xxx
 forgeone session list
 forgeone approve session_xxx
 forgeone resume session_xxx
+forgeone tool list
+forgeone plugin list
+forgeone mcp list
+forgeone skill list
 ```
 
 CLI 的设计原则：
@@ -174,5 +178,21 @@ CLI 的设计原则：
 - `read_file` 内建 Tool 与结构化 Observation
 - `RequireApproval -> waiting_approval -> approve/resume` 会话控制链路
 - `.forgeone/` 下的 session / trace 持久化，以及 `trace list/show/prune`、`session list/prune`
+- `tool list` 与 `.forgeone/plugins`、`.forgeone/mcp`、`.forgeone/skills` 清单发现能力
+
+当前 `MCP / Plugin / Skill` 的落地边界是：
+
+- 已支持扩展清单发现、能力枚举与 CLI 可见性
+- 已在 Tool Runtime 内保留统一 Provider / Tool Descriptor 边界
+- 尚未把外部 MCP Server、Plugin Entrypoint、Skill Entrypoint 接入主执行链路
 
 当前仍处于早期实现阶段，重点是把 Runtime、Context、Tool、Policy、Trace 的执行语义继续做实，并逐步补齐更完整的 CLI / TUI / 扩展面。
+## 后端下一阶段
+
+ForgeOne 后端下一阶段的重点不是继续堆叠入口能力，而是把 Runtime Core 进一步解耦为稳定的后端运行时边界：
+
+- 将 `Session Store`、`Runtime Runner`、`Trace Projection` 从单体 `Runtime Core` 中拆出
+- 将 `Context Snapshot` 演进为可版本化、可重建的 `Context Epoch`
+- 将 `Tool Registry` 演进为带作用域、注册身份和陈旧调用拒绝语义的 `Tool Runtime`
+- 将静态 `Policy Engine` 与运行时 `Permission Service` 分层
+- 优先把 `MCP` 作为一类标准外部能力接入主执行链路，再扩展 `Plugin` 与 `Skill`

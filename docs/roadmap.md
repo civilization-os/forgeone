@@ -62,3 +62,16 @@
 - `TraceEvent.kind`
 - `TraceEvent.agent_id`
 - `TraceEvent.parent_agent_id`
+## 后端演进补充
+
+在当前路线图之上，后端实现顺序建议进一步细化为：
+
+1. 拆分 `Session Store`、`Runtime Runner`、`Trace Projection`
+2. 为 `Context` 引入 `Context Epoch` 与 safe-boundary reconcile
+3. 为 `Tool Runtime` 引入作用域、注册身份和陈旧调用拒绝
+4. 将 `Policy Engine` 与运行时 `Permission Service` 分层
+5. 先把 `MCP` 接入主执行链路
+6. 再开放 `Plugin`
+7. 最后开放 `Skill`
+
+该顺序的目标是先稳住 Runtime、Context、Tool、Permission 这些后端基础设施，再继续扩展能力面。

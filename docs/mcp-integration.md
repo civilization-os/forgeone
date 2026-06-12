@@ -51,6 +51,13 @@ MCP 接入后至少应映射出以下信息：
 - 资源消耗预估
 - 可观测标识
 
+## 当前落地边界
+
+- 工作区通过 `.forgeone/mcp/*.json` 声明 MCP Provider 清单
+- 当前已支持清单发现与 `forgeone mcp list`
+- MCP Server 连接、认证、超时、重连和实际 Tool 调用尚未接入 Runtime 主链路
+- 后续落地时，MCP 能力仍必须统一映射为标准 `Tool Descriptor` 与 `Tool Call`
+
 ## 风险控制
 
 MCP Server 可能带来以下风险：

@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 crossterm = "0.28"
+forgeone-runtime = { path = "../forgeone-runtime" }
+forgeone-model-ollama = { path = "../forgeone-model-ollama" }
+forgeone-trace = { path = "../forgeone-trace" }
 ratatui = "0.29"
 unicode-width = "0.2"
 

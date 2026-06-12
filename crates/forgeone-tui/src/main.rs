@@ -1,153 +1,75 @@
-use std::io;
-use std::time::Duration;
-
-use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use forgeone_tui::{DashboardState, FocusPane, render_dashboard};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use forgeone_tui::{DashboardState, launch_tui, load_dashboard, render_dashboard};
+use std::env;
+use std::process;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal);
-    restore_terminal(&mut terminal)?;
-    result
-}
+    let mut args = env::args().skip(1);
+    if let Some(flag) = args.next() {
+        if flag == "--dump" {
+            let mut session_id = None;
+            let mut width = 120;
+            let mut height = 30;
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = DashboardState::mock();
-
-    loop {
-        terminal.draw(|frame| render_dashboard(frame, &state))?;
-
-        if !event::poll(Duration::from_millis(100))? {
-            continue;
-        }
-
-        match event::read()? {
-            Event::Paste(text) => {
-                if state.focus == FocusPane::Input {
-                    state.cancel_exit();
-                    state.record_paste(text.as_str());
+            if let Some(arg) = args.next() {
+                if let Ok(w) = arg.parse::<u16>() {
+                    width = w;
+                    if let Some(h_arg) = args.next() {
+                        if let Ok(h) = h_arg.parse::<u16>() {
+                            height = h;
+                        }
+                    }
+                } else {
+                    session_id = Some(arg);
+                    if let Some(w_arg) = args.next() {
+                        if let Ok(w) = w_arg.parse::<u16>() {
+                            width = w;
+                        }
+                    }
+                    if let Some(h_arg) = args.next() {
+                        if let Ok(h) = h_arg.parse::<u16>() {
+                            height = h;
+                        }
+                    }
                 }
             }
-            Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Tab => state.cycle_focus(),
-                    KeyCode::Up => {
-                        state.cancel_exit();
-                    }
-                    KeyCode::Down => {
-                        state.cancel_exit();
-                    }
-                    KeyCode::Left => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.move_cursor_left();
-                        }
-                    }
-                    KeyCode::Right => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.move_cursor_right();
-                        }
-                    }
-                    KeyCode::Home => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.move_cursor_home();
-                        }
-                    }
-                    KeyCode::End => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.move_cursor_end();
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.backspace();
-                        }
-                    }
-                    KeyCode::Delete => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input {
-                            state.delete_forward();
-                        }
-                    }
-                    KeyCode::Esc => {
-                        if state.exit_pending {
-                            state.cancel_exit();
-                        } else if state.focus == FocusPane::Input {
-                            state.clear_input();
-                        }
-                    }
-                    KeyCode::Enter => {
-                        state.cancel_exit();
-                        if state.focus == FocusPane::Input && !state.input.is_empty() {
-                            state.hint = format!("已提交: {}", state.input);
-                            state.clear_input();
-                        }
-                    }
-                    KeyCode::Char(ch) => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && (ch == 'c' || ch == 'C')
-                        {
-                            if state.exit_pending {
-                                return Ok(());
-                            }
-                            state.arm_exit();
-                        } else {
-                            state.cancel_exit();
-                            if state.focus == FocusPane::Input {
-                                state.append_char(ch);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
+            dump_session_ui(session_id.as_deref(), width, height)?;
+            return Ok(());
+        } else if flag == "--help" || flag == "-h" {
+            println!(
+                "usage:\n  forgeone-tui [session_id]\n  forgeone-tui --dump [session_id] [width] [height]"
+            );
+            process::exit(0);
+        } else {
+            // It is a session_id
+            return launch_tui(Some(&flag));
         }
     }
+
+    launch_tui(None)
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        SetCursorStyle::SteadyBar
-    )?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
-}
-
-fn restore_terminal(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+fn dump_session_ui(
+    session_id: Option<&str>,
+    width: u16,
+    height: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        SetCursorStyle::DefaultUserShape,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend)?;
+    let state = load_dashboard(session_id).unwrap_or_else(|error| {
+        DashboardState::empty(format!("failed to load runtime view: {error}"))
+    });
+    terminal.draw(|frame| render_dashboard(frame, &state))?;
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            line.push_str(cell.symbol());
+        }
+        println!("{}", line);
+    }
     Ok(())
 }

@@ -100,7 +100,11 @@ impl PolicyEngine {
         }
 
         if tool_uses_read_roots(&request.tool_name) {
-            let raw_path = request.arguments.get("path").map(|s| s.as_str()).unwrap_or(".");
+            let raw_path = request
+                .arguments
+                .get("path")
+                .map(|s| s.as_str())
+                .unwrap_or(".");
             let path = normalize_path_for_policy(raw_path);
 
             let allowed = self

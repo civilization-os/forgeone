@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use forgeone_model::{
-    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate,
-    ModelResponse,
+    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse,
 };
 
 /// Ollama local model adapter.
@@ -75,7 +74,9 @@ impl ModelAdapter for OllamaModelAdapter {
             .saturating_add(message_overhead)
             .saturating_add(caps.reserved_output_tokens);
         ModelRequestEstimate {
-            prompt_tokens: request.prompt_token_estimate.saturating_add(message_overhead),
+            prompt_tokens: request
+                .prompt_token_estimate
+                .saturating_add(message_overhead),
             total_expected_tokens,
             within_context_window: total_expected_tokens <= caps.context_window,
         }
@@ -86,35 +87,32 @@ impl ModelAdapter for OllamaModelAdapter {
         let payload = build_ollama_payload(request);
         let url = format!("{}/api/chat", self.endpoint.trim_end_matches('/'));
 
-        let response_body: serde_json::Value =
-            match ureq::post(&url)
-                .set("Content-Type", "application/json")
-                .send_json(&payload)
-            {
-                Ok(response) => match response.into_json() {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return ModelResponse {
-                            response_id,
-                            action: ModelAction::FinalResponse {
-                                content: format!(
-                                    "[ollama adapter] failed to parse response: {error}"
-                                ),
-                            },
-                            summary: format!("ollama parse error: {error}"),
-                        };
-                    }
-                },
+        let response_body: serde_json::Value = match ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(&payload)
+        {
+            Ok(response) => match response.into_json() {
+                Ok(json) => json,
                 Err(error) => {
                     return ModelResponse {
                         response_id,
                         action: ModelAction::FinalResponse {
-                            content: format!("[ollama adapter] request failed: {error}"),
+                            content: format!("[ollama adapter] failed to parse response: {error}"),
                         },
-                        summary: format!("ollama request error: {error}"),
+                        summary: format!("ollama parse error: {error}"),
                     };
                 }
-            };
+            },
+            Err(error) => {
+                return ModelResponse {
+                    response_id,
+                    action: ModelAction::FinalResponse {
+                        content: format!("[ollama adapter] request failed: {error}"),
+                    },
+                    summary: format!("ollama request error: {error}"),
+                };
+            }
+        };
 
         // Extract content from Ollama response format
         let raw_content = response_body["message"]["content"]
@@ -154,7 +152,9 @@ impl ModelAdapter for OllamaModelAdapter {
 
         ModelResponse {
             response_id,
-            action: ModelAction::FinalResponse { content: raw_content },
+            action: ModelAction::FinalResponse {
+                content: raw_content,
+            },
             summary,
         }
     }
@@ -165,9 +165,11 @@ impl ModelAdapter for OllamaModelAdapter {
 ///      "qwen2.5-coder:7b" → "qwen2.5-coder:7b"
 fn strip_model_prefix(name: &str) -> &str {
     name.split_once(':')
-        .map(|(prefix, rest)| {
-            if prefix == "ollama" { rest } else { name }
-        })
+        .map(
+            |(prefix, rest)| {
+                if prefix == "ollama" { rest } else { name }
+            },
+        )
         .unwrap_or(name)
 }
 
@@ -225,7 +227,9 @@ impl OllamaClient {
     /// Check if a specific model is available locally.
     pub fn has_model(&self, model_name: &str) -> Result<bool, String> {
         let models = self.list_models()?;
-        Ok(models.iter().any(|m| m == model_name || m.starts_with(model_name)))
+        Ok(models
+            .iter()
+            .any(|m| m == model_name || m.starts_with(model_name)))
     }
 
     /// Pull a model from the Ollama registry (blocks until complete).
@@ -264,9 +268,7 @@ fn strip_code_fence(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with("```") {
         // Remove opening fence (```json, ```, etc.) and closing fence
-        let after_fence = trimmed
-            .strip_prefix("```")
-            .unwrap_or(trimmed);
+        let after_fence = trimmed.strip_prefix("```").unwrap_or(trimmed);
         // Skip optional language identifier line
         let body = if let Some(pos) = after_fence.find('\n') {
             &after_fence[pos + 1..]
@@ -296,8 +298,8 @@ fn chrono_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgeone_model::{ModelAdapter, next_model_request_id};
     use forgeone_model::PromptMessage;
+    use forgeone_model::{ModelAdapter, next_model_request_id};
 
     #[test]
     fn strips_prefix_in_payload() {
@@ -324,7 +326,10 @@ mod tests {
 
     #[test]
     fn strip_model_prefix_works() {
-        assert_eq!(strip_model_prefix("ollama:qwen2.5-coder:7b"), "qwen2.5-coder:7b");
+        assert_eq!(
+            strip_model_prefix("ollama:qwen2.5-coder:7b"),
+            "qwen2.5-coder:7b"
+        );
         assert_eq!(strip_model_prefix("qwen2.5-coder:7b"), "qwen2.5-coder:7b");
         assert_eq!(strip_model_prefix("mock"), "mock");
     }

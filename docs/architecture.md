@@ -254,3 +254,50 @@ sequenceDiagram
 - 所有关键决策都必须进入 Trace
 - 所有安全与预算约束都必须由 Policy Engine 统一执行
 - 所有本地恢复点都必须通过 Runtime State 与 `.forgeone` Session Store 统一管理
+## 后端演进方向
+
+ForgeOne 后端下一阶段应优先收敛 Runtime 边界，而不是继续把更多控制逻辑叠加进 `forgeone-runtime`。
+
+目标边界如下：
+
+### Session Store
+
+- 负责 durable session、message、admission、resume checkpoint
+- 不直接承担 Agent Loop 推进
+- 不直接承担 Tool Registry 组装
+
+### Runtime Runner
+
+- 负责从 `session_id` 或恢复点启动一次受控 `Agent Loop`
+- 负责协调 `Context Engine`、`Model Adapter`、`Tool Runtime`、`Policy Engine`
+- 不直接拥有持久化 schema
+
+### Trace Projection
+
+- 负责把 durable runtime event 投影为 `SessionTraceRecord`、状态摘要和后续查询视图
+- 不与主执行路径共享隐式状态
+
+### Context Epoch
+
+- `Context` 不再仅是每轮临时快照
+- 需要引入可版本化的 baseline、source fingerprint 和 safe-boundary reconcile 语义
+- `AGENTS.md`、Policy 注入、Skill 引导、环境事实应视为结构化 Context Source
+
+### Tool Runtime
+
+- Tool 必须带 `registration identity`
+- Tool 注册必须具备 `scope`
+- 每轮对模型暴露的 Tool 集必须被物化为稳定 catalog
+- 执行期若注册已变更，Runtime 必须返回陈旧调用错误，而不是静默执行新版本
+
+### Permission Service
+
+- `Policy Engine` 只负责规则求值
+- `Permission Service` 负责 ask / once / always / reject / pending approval
+- Approval 不应只是 `RuntimeState` 上的一个附属字段，而应是独立运行时服务
+
+### MCP / Plugin / Skill
+
+- `MCP` 应被视为标准外部 Tool / Context Provider 运行时，而不是 CLI 附属配置
+- `Plugin` 应提供受控 lifecycle、作用域和可审计 hook，而不是绕过 Runtime Core
+- `Skill` 是 Context 与任务模式能力，不替代核心 Agent Loop

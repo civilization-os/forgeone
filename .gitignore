@@ -2,3 +2,5 @@
 /.forgeone
 .forgeone/
 .reasonix/
+/target-runtime-check/
+/reference/

@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 forgeone-runtime = { path = "../forgeone-runtime" }
+forgeone-tui = { path = "../forgeone-tui" }
+forgeone-tools = { path = "../forgeone-tools" }
 
 [[bin]]
 name = "forgeone"

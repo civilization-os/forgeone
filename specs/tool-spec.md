@@ -28,7 +28,9 @@
 当前实现说明：
 
 - 主仓库当前只内建了 `read_file`
-- `MCP`、`Plugin`、`Skill`、`Workflow` 类型已在协议层预留，但尚未在主链路中落地执行器
+- `MCP`、`Plugin`、`Skill`、`Workflow` 类型已在协议层预留
+- 当前已落地 Provider 元数据与工作区清单发现
+- `MCP`、`Plugin`、`Skill`、`Workflow` 仍尚未在主链路中落地执行器
 
 ## Tool Registry
 
@@ -39,6 +41,7 @@
 - 未注册工具必须返回结构化 `validation_error`
 - Runtime 不应绕过 `ToolRegistry` 直接调用底层执行逻辑
 - 新增工具必须先注册，再由 Runtime 调度
+- `ToolRegistry` 应保留 Tool 到 Provider 的映射关系，保证扩展来源可追踪
 
 ## Tool Call Request
 

@@ -199,6 +199,8 @@ name = "forgeone-cli"
 version = "0.1.0"
 dependencies = [
  "forgeone-runtime",
+ "forgeone-tools",
+ "forgeone-tui",
 ]
 
 [[package]]
@@ -248,7 +250,15 @@ dependencies = [
  "forgeone-model-ollama",
  "forgeone-model-openai",
  "forgeone-policy",
+ "forgeone-session",
  "forgeone-tools",
+ "forgeone-trace",
+]
+
+[[package]]
+name = "forgeone-session"
+version = "0.1.0"
+dependencies = [
  "forgeone-trace",
  "serde",
  "serde_json",
@@ -259,6 +269,8 @@ name = "forgeone-tools"
 version = "0.1.0"
 dependencies = [
  "regex-lite",
+ "serde",
+ "serde_json",
  "walkdir",
 ]
 
@@ -274,6 +286,9 @@ name = "forgeone-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "forgeone-model-ollama",
+ "forgeone-runtime",
+ "forgeone-trace",
  "ratatui",
  "unicode-width 0.2.0",
 ]

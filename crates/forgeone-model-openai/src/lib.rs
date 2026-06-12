@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use forgeone_model::{
-    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate,
-    ModelResponse,
+    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse,
 };
 
 /// OpenAI-compatible model adapter.
@@ -34,18 +33,18 @@ impl OpenAiModelAdapter {
         }
     }
 
-    /// Create from environment variables. Panics if `OPENAI_API_KEY` is not set.
+    /// Create from environment variables.
     ///
     /// - `OPENAI_API_KEY` (required)
     /// - `OPENAI_BASE_URL` (optional, defaults to `https://api.openai.com/v1`)
     /// - `OPENAI_MODEL` (optional, defaults to `gpt-4o`)
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let api_key = std::env::var("OPENAI_API_KEY")
-            .expect("OPENAI_API_KEY must be set when using OpenAiModelAdapter::from_env()");
+            .map_err(|_| "OPENAI_API_KEY must be set when using openai:* models".to_string())?;
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-        Self::new(api_key, model, base_url)
+        Ok(Self::new(api_key, model, base_url))
     }
 }
 
@@ -78,7 +77,9 @@ impl ModelAdapter for OpenAiModelAdapter {
             .saturating_add(message_overhead)
             .saturating_add(caps.reserved_output_tokens);
         ModelRequestEstimate {
-            prompt_tokens: request.prompt_token_estimate.saturating_add(message_overhead),
+            prompt_tokens: request
+                .prompt_token_estimate
+                .saturating_add(message_overhead),
             total_expected_tokens,
             within_context_window: total_expected_tokens <= caps.context_window,
         }
@@ -89,36 +90,33 @@ impl ModelAdapter for OpenAiModelAdapter {
         let payload = build_payload(request, &self.model);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
-        let response_body: serde_json::Value =
-            match ureq::post(&url)
-                .set("Authorization", &format!("Bearer {}", self.api_key))
-                .set("Content-Type", "application/json")
-                .send_json(&payload)
-            {
-                Ok(response) => match response.into_json() {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return ModelResponse {
-                            response_id,
-                            action: ModelAction::FinalResponse {
-                                content: format!(
-                                    "[openai adapter] failed to parse response: {error}"
-                                ),
-                            },
-                            summary: format!("openai parse error: {error}"),
-                        };
-                    }
-                },
+        let response_body: serde_json::Value = match ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_json(&payload)
+        {
+            Ok(response) => match response.into_json() {
+                Ok(json) => json,
                 Err(error) => {
                     return ModelResponse {
                         response_id,
                         action: ModelAction::FinalResponse {
-                            content: format!("[openai adapter] request failed: {error}"),
+                            content: format!("[openai adapter] failed to parse response: {error}"),
                         },
-                        summary: format!("openai request error: {error}"),
+                        summary: format!("openai parse error: {error}"),
                     };
                 }
-            };
+            },
+            Err(error) => {
+                return ModelResponse {
+                    response_id,
+                    action: ModelAction::FinalResponse {
+                        content: format!("[openai adapter] request failed: {error}"),
+                    },
+                    summary: format!("openai request error: {error}"),
+                };
+            }
+        };
 
         parse_response(&response_body, &response_id)
     }
@@ -183,7 +181,9 @@ fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse 
 
     ModelResponse {
         response_id: response_id.to_string(),
-        action: ModelAction::FinalResponse { content: raw_content },
+        action: ModelAction::FinalResponse {
+            content: raw_content,
+        },
         summary,
     }
 }
@@ -208,9 +208,7 @@ fn strip_code_fence(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with("```") {
         // Remove opening fence (```json, ```, etc.) and closing fence
-        let after_fence = trimmed
-            .strip_prefix("```")
-            .unwrap_or(trimmed);
+        let after_fence = trimmed.strip_prefix("```").unwrap_or(trimmed);
         // Skip optional language identifier line
         let body = if let Some(pos) = after_fence.find('\n') {
             &after_fence[pos + 1..]
@@ -240,8 +238,8 @@ fn chrono_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgeone_model::{ModelAdapter, next_model_request_id};
     use forgeone_model::PromptMessage;
+    use forgeone_model::{ModelAdapter, next_model_request_id};
 
     #[test]
     fn parses_tool_call_json_from_response() {

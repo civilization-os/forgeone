@@ -575,7 +575,9 @@ fn assemble_messages(
     if !user_segments.is_empty() {
         let layer_header = layers
             .iter()
-            .filter(|layer| layer.layer != ContextLayer::GoalAnchor && !layer.segment_refs.is_empty())
+            .filter(|layer| {
+                layer.layer != ContextLayer::GoalAnchor && !layer.segment_refs.is_empty()
+            })
             .map(|layer| format!("{} tokens={}", layer.layer, layer.token_estimate))
             .collect::<Vec<_>>()
             .join("\n");
@@ -721,10 +723,12 @@ mod tests {
                 .iter()
                 .any(|source| source.label == "working_memory")
         );
-        assert!(snapshot
-            .sources
-            .iter()
-            .any(|source| source.label == "working_set"));
+        assert!(
+            snapshot
+                .sources
+                .iter()
+                .any(|source| source.label == "working_set")
+        );
     }
 
     #[test]
@@ -827,9 +831,11 @@ mod tests {
             source.label == "older_observation_summary"
                 && source.layer == ContextLayer::ArchiveSummary
         }));
-        assert!(snapshot
-            .compression_events
-            .iter()
-            .any(|event| event.strategy == super::CompressionStrategy::MergeSummary));
+        assert!(
+            snapshot
+                .compression_events
+                .iter()
+                .any(|event| event.strategy == super::CompressionStrategy::MergeSummary)
+        );
     }
 }

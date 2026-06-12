@@ -16,6 +16,19 @@ Tool Runtime 负责统一管理 Agent 可调用能力，包括本地工具、MCP
 - Tool Execution 前统一走 `Policy Engine`
 - `tool_requested / policy_checked / tool_completed` Trace 事件
 
+当前额外已落地的扩展骨架：
+
+- `ToolProviderDescriptor`
+- Builtin Provider 注册
+- `.forgeone/plugins`、`.forgeone/mcp`、`.forgeone/skills` 清单发现
+- `tool list` / `plugin list` / `mcp list` / `skill list` CLI 可见性
+
+当前尚未落地：
+
+- 外部 MCP Server 实际连接与调度
+- Plugin Entrypoint 实际加载与执行
+- Skill Entrypoint 实际加载与执行
+
 ## 设计要求
 
 - Tool Call 可追踪

@@ -327,3 +327,104 @@ Runtime 必须为以下事件生成 Trace：
 - 所有停止原因都必须具有结构化字段，不允许只保留自然语言描述
 - 需要人工确认的 Tool Call 必须在 Runtime State 与 Trace 中留下结构化恢复点
 - `SessionTraceRecord` 与 `ApprovalSessionRecord` 不得绕过 Runtime 私自生成
+## 后端演进约束
+
+当前 Runtime 规范已经覆盖最小单 Agent 执行链路，但后续后端演进必须满足以下约束，避免把 ForgeOne 固化为单体 loop 项目。
+
+### Session Store 与 Runtime Runner 解耦
+
+后续实现应显式区分：
+
+- `Session Store`
+- `Runtime Runner`
+- `Trace Projection`
+
+约束：
+
+- `Session Store` 负责 durable session、message、admission、resume checkpoint
+- `Runtime Runner` 负责推进 `Agent Loop`
+- `Trace Projection` 负责把 durable event 投影成查询视图
+- `Runtime Runner` 不得直接把内部临时字段等同为 durable session schema
+
+### Context Epoch
+
+当前 `ContextSnapshot` 是每轮构建产物。后续后端应在此之上引入 `Context Epoch` 概念。
+
+建议最小字段：
+
+- `epoch_id`
+- `revision`
+- `agent_id`
+- `baseline_snapshot`
+- `source_fingerprints`
+- `last_reconciled_at`
+
+约束：
+
+- privileged system context 必须具备可版本化 baseline
+- source 变化应在 safe boundary 上 reconcile，而不是任意时刻注入
+- model-visible context update 必须可追踪到具体 source 变化
+- `AGENTS.md`、Policy 注入、Skill 引导、环境事实应被视为结构化 Context Source
+
+### Tool Runtime 作用域与注册身份
+
+当前 `ToolRegistry` 已有统一 `ToolDescriptor` 协议。后续必须补足作用域与注册身份语义。
+
+建议最小概念：
+
+- `tool_registration_id`
+- `tool_scope_id`
+- `materialized_tool_catalog`
+
+约束：
+
+- 每次对模型暴露 Tool 集时，必须固化 `tool_name -> tool_registration_id`
+- Tool 调用执行前必须校验其目标注册身份是否仍然有效
+- 若 Tool 注册已被替换、卸载或隐藏，应返回结构化陈旧调用错误
+- Runtime 不得在广告给模型之后静默切换到另一个同名 Tool 实现
+
+### Policy Engine 与 Permission Service 分层
+
+当前 `Policy Engine` 同时承担静态规则检查和 approval 语义。后续应拆分为：
+
+- `Policy Engine`
+- `Permission Service`
+
+建议 `Permission Service` 最小职责：
+
+- `ask`
+- `reply`
+- `pending_requests`
+- `session_scoped_approvals`
+
+约束：
+
+- `Policy Engine` 负责 declarative evaluation
+- `Permission Service` 负责 `once / always / reject / corrected feedback`
+- Tool、MCP、Plugin、Skill 不得直接绕过 `Permission Service`
+- Approval 不应只作为 `RuntimeState.pending_approval` 的附属字段存在
+
+### MCP 作为一类标准后端能力
+
+后续 `MCP` 接入时，必须视其为标准外部 Tool / Context Provider 运行时。
+
+约束：
+
+- `MCP` 的连接状态、可用能力、认证状态、超时和失败语义必须进入 Trace
+- `MCP Tool` 必须映射为标准 `ToolCallRequest / ToolCallResult`
+- `MCP Resource` 或 Prompt 若进入 Context，也必须进入 Context Source 体系
+- 不得把 `MCP` 写成仅服务于某个交互入口的旁路逻辑
+
+### 扩展接入顺序
+
+后续后端建议按以下顺序推进：
+
+1. `Session Store / Runtime Runner / Trace Projection`
+2. `Context Epoch`
+3. `Tool Runtime` 作用域与注册身份
+4. `Permission Service`
+5. `MCP`
+6. `Plugin`
+7. `Skill`
+
+该顺序的目的不是功能堆叠，而是先稳定 Runtime、Context、Tool、Permission 这些核心后端边界，再引入扩展系统。

@@ -45,6 +45,13 @@ flowchart LR
 - `entrypoints`
 - `config_schema`
 
+## 当前落地边界
+
+- 工作区通过 `.forgeone/plugins/*.json` 声明 Plugin 清单
+- 当前清单用于 Provider 发现、能力枚举与 `forgeone plugin list`
+- Plugin Entrypoint 尚未接入主执行链路，执行态仍待后续 Runtime 集成
+- 一旦进入执行态，Plugin Tool 仍必须经过 `Tool Runtime -> Policy Engine -> Trace System`
+
 ## 与 Tool Runtime 的关系
 
 若插件提供工具能力，这些能力必须：
