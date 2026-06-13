@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/forgeone-cli",
     "crates/forgeone-context",
     "crates/forgeone-model",
     "crates/forgeone-model-openai",
@@ -8,9 +7,9 @@ members = [
     "crates/forgeone-policy",
     "crates/forgeone-runtime",
     "crates/forgeone-session",
-    "crates/forgeone-tui",
     "crates/forgeone-tools",
     "crates/forgeone-trace",
+    "crates/forgeone-server",
 ]
 resolver = "2"
 

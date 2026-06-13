@@ -1,5 +1,5 @@
 [package]
-name = "forgeone-tui"
+name = "forgeone-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-crossterm = "0.28"
 forgeone-runtime = { path = "../forgeone-runtime" }
-forgeone-model-ollama = { path = "../forgeone-model-ollama" }
-forgeone-trace = { path = "../forgeone-trace" }
-ratatui = "0.29"
-unicode-width = "0.2"
+forgeone-tools = { path = "../forgeone-tools" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
-name = "forgeone-tui"
+name = "forgeone-server"
 path = "src/main.rs"

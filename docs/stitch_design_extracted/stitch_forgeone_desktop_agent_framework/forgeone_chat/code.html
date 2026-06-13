@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>ForgeOne - Main Chat</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=Geist:wght@450&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-primary-fixed-variant": "#474647",
+                    "on-tertiary": "#ffffff",
+                    "surface-container-lowest": "#ffffff",
+                    "on-surface-variant": "#46474a",
+                    "surface-container-low": "#f4f4f2",
+                    "surface-container": "#eeeeec",
+                    "inverse-surface": "#2f3130",
+                    "on-secondary-fixed": "#1b1c1c",
+                    "on-background": "#1a1c1b",
+                    "primary": "#000000",
+                    "secondary": "#5e5e5e",
+                    "surface-variant": "#e2e3e1",
+                    "on-error-container": "#93000a",
+                    "surface-container-highest": "#e2e3e1",
+                    "on-tertiary-container": "#838484",
+                    "on-error": "#ffffff",
+                    "primary-fixed": "#e5e2e3",
+                    "secondary-fixed-dim": "#c7c6c6",
+                    "primary-fixed-dim": "#c8c6c7",
+                    "on-surface": "#1a1c1b",
+                    "on-primary": "#ffffff",
+                    "inverse-on-surface": "#f1f1ef",
+                    "background": "#f9f9f7",
+                    "on-tertiary-fixed-variant": "#454747",
+                    "tertiary-fixed-dim": "#c6c6c6",
+                    "tertiary": "#000000",
+                    "outline": "#76777b",
+                    "inverse-primary": "#c8c6c7",
+                    "outline-variant": "#c7c6ca",
+                    "on-secondary": "#ffffff",
+                    "on-secondary-fixed-variant": "#464747",
+                    "surface": "#f9f9f7",
+                    "surface-container-high": "#e8e8e6",
+                    "error-container": "#ffdad6",
+                    "tertiary-container": "#1a1c1c",
+                    "on-tertiary-fixed": "#1a1c1c",
+                    "secondary-fixed": "#e4e2e2",
+                    "secondary-container": "#e1dfdf",
+                    "on-secondary-container": "#626262",
+                    "surface-bright": "#f9f9f7",
+                    "surface-tint": "#5f5e5f",
+                    "surface-dim": "#dadad8",
+                    "primary-container": "#1b1b1c",
+                    "on-primary-container": "#858384",
+                    "on-primary-fixed": "#1b1b1c",
+                    "error": "#ba1a1a",
+                    "tertiary-fixed": "#e2e2e2"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "spacing": {
+                    "lg": "32px",
+                    "xl": "48px",
+                    "sidebar-width": "260px",
+                    "container-max": "1200px",
+                    "md": "20px",
+                    "xs": "8px",
+                    "base": "4px",
+                    "sm": "12px"
+            },
+            "fontFamily": {
+                    "label-caps": [
+                            "Inter"
+                    ],
+                    "display": [
+                            "Inter"
+                    ],
+                    "body-md": [
+                            "Inter"
+                    ],
+                    "body-lg": [
+                            "Inter"
+                    ],
+                    "headline-md": [
+                            "Inter"
+                    ],
+                    "code-sm": [
+                            "Geist"
+                    ]
+            },
+            "fontSize": {
+                    "label-caps": [
+                            "11px",
+                            {
+                                    "lineHeight": "1",
+                                    "letterSpacing": "0.05em",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "display": [
+                            "32px",
+                            {
+                                    "lineHeight": "1.2",
+                                    "letterSpacing": "-0.02em",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "body-md": [
+                            "14px",
+                            {
+                                    "lineHeight": "1.5",
+                                    "letterSpacing": "0",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "body-lg": [
+                            "16px",
+                            {
+                                    "lineHeight": "1.6",
+                                    "letterSpacing": "0",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "headline-md": [
+                            "20px",
+                            {
+                                    "lineHeight": "1.4",
+                                    "letterSpacing": "-0.01em",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "code-sm": [
+                            "13px",
+                            {
+                                    "lineHeight": "1.6",
+                                    "letterSpacing": "0",
+                                    "fontWeight": "450"
+                            }
+                    ]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            background-color: theme('colors.background');
+            color: theme('colors.on-surface');
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: theme('colors.surface-variant');
+            border-radius: 4px;
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background-color: theme('colors.outline-variant');
+        }
+
+        .chat-input:focus-within {
+            background-color: theme('colors.surface-container-lowest');
+            border-color: #2D63ED;
+            box-shadow: 0 0 0 1px #2D63ED;
+        }
+    </style>
+</head>
+<body class="h-screen w-full overflow-hidden flex bg-background">
+<!-- SideNavBar -->
+<nav class="fixed left-0 top-0 h-full w-sidebar-width bg-surface-container-low flex flex-col border-r border-surface-variant z-20">
+<!-- Header -->
+<div class="p-lg flex items-center gap-sm">
+<div class="w-8 h-8 rounded bg-primary flex items-center justify-center text-on-primary">
+<span class="material-symbols-outlined text-body-lg">settings_suggest</span>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md font-bold text-on-surface">ForgeOne</h1>
+<p class="text-label-caps font-label-caps text-on-surface-variant">v1.2.0</p>
+</div>
+</div>
+<!-- CTA -->
+<div class="px-md pb-md">
+<button class="w-full flex items-center justify-center gap-xs py-[8px] px-[16px] bg-primary text-on-primary rounded text-body-md font-body-md hover:bg-inverse-surface transition-colors duration-150 cursor-pointer active:scale-95">
+<span class="material-symbols-outlined text-body-lg">add</span>
+                New Agent
+            </button>
+</div>
+<!-- Main Navigation Tabs -->
+<div class="flex-1 overflow-y-auto custom-scrollbar px-md flex flex-col gap-base">
+<!-- Active Tab -->
+<div class="flex items-center gap-sm px-sm py-[8px] rounded bg-surface-container-highest text-on-surface font-semibold cursor-pointer active:scale-95 transition-all duration-150">
+<span class="material-symbols-outlined text-body-lg" style="font-variation-settings: 'FILL' 1;">chat</span>
+<span class="text-body-md font-body-md">Chat</span>
+</div>
+<!-- Inactive Tabs -->
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">folder_open</span>
+<span class="text-body-md font-body-md">Projects</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">smart_toy</span>
+<span class="text-body-md font-body-md">Models</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">extension</span>
+<span class="text-body-md font-body-md">MCP</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">construction</span>
+<span class="text-body-md font-body-md">Skills</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">policy</span>
+<span class="text-body-md font-body-md">Policies</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">analytics</span>
+<span class="text-body-md font-body-md">Traces</span>
+</div>
+</div>
+<!-- Footer Navigation -->
+<div class="mt-auto p-md border-t border-surface-variant flex flex-col gap-base">
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">settings</span>
+<span class="text-body-md font-body-md">Settings</span>
+</div>
+<div class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container cursor-pointer active:scale-95 transition-colors duration-150">
+<span class="material-symbols-outlined text-body-lg">help</span>
+<span class="text-body-md font-body-md">Support</span>
+</div>
+</div>
+</nav>
+<!-- Main Canvas Area -->
+<main class="ml-sidebar-width w-[calc(100%-sidebar-width)] h-full flex flex-col relative z-10">
+<!-- TopAppBar (Semantic Shell requirement) -->
+<header class="flex justify-between items-center h-16 px-lg bg-surface border-b border-surface-variant shrink-0 z-10 transition-all duration-200">
+<div class="flex-1 flex items-center gap-sm max-w-md">
+<div class="relative w-full">
+<span class="material-symbols-outlined absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant text-body-lg">search</span>
+<input class="w-full bg-[#F3F3F1] border-none rounded py-[6px] pl-[36px] pr-sm text-body-md font-body-md text-on-surface placeholder:text-on-surface-variant focus:ring-0 focus:bg-surface-container-lowest focus:border-[#2D63ED] focus:border transition-colors" placeholder="Search chats, projects, traces..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-sm ml-auto">
+<button class="p-xs rounded text-on-surface-variant hover:bg-surface-container-low transition-colors">
+<span class="material-symbols-outlined text-body-lg">notifications</span>
+</button>
+<button class="p-xs rounded text-on-surface-variant hover:bg-surface-container-low transition-colors">
+<span class="material-symbols-outlined text-body-lg">cloud_done</span>
+</button>
+<button class="p-xs rounded text-on-surface-variant hover:bg-surface-container-low transition-colors ml-sm">
+<span class="material-symbols-outlined text-body-lg" style="font-variation-settings: 'FILL' 1;">account_circle</span>
+</button>
+</div>
+</header>
+<!-- Chat Stream -->
+<div class="flex-1 overflow-y-auto custom-scrollbar relative flex flex-col">
+<div class="max-w-[800px] w-full mx-auto p-lg flex flex-col gap-lg pb-[120px]">
+<!-- Date Separator -->
+<div class="flex justify-center my-md">
+<span class="px-sm py-xs bg-surface-container-low rounded text-label-caps font-label-caps text-on-surface-variant">TODAY</span>
+</div>
+<!-- Agent Welcome Message -->
+<div class="flex gap-md max-w-[85%]">
+<div class="w-8 h-8 rounded bg-primary shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-[16px]">smart_toy</span>
+</div>
+<div class="flex flex-col gap-xs w-full">
+<span class="text-label-caps font-label-caps text-on-surface-variant">ForgeOne Core Agent</span>
+<div class="bg-surface-container-lowest border border-[#EBEBE8] rounded p-[16px] shadow-[0px_4px_20px_rgba(0,0,0,0.04)]">
+<p class="text-body-lg font-body-lg text-on-surface leading-relaxed">
+                                Hello. I'm connected to your workspace. How can we advance your project today?
+                            </p>
+</div>
+</div>
+</div>
+<!-- User Message -->
+<div class="flex flex-col items-end gap-xs max-w-[85%] self-end">
+<span class="text-label-caps font-label-caps text-on-surface-variant mr-1">You</span>
+<div class="p-[12px] bg-transparent">
+<p class="text-body-lg font-body-lg text-on-surface text-right leading-relaxed">
+                            Can you write a python script to fetch the latest metrics from the MCP cluster and format them into a markdown table?
+                        </p>
+</div>
+</div>
+<!-- Agent Response with Code -->
+<div class="flex gap-md max-w-[95%]">
+<div class="w-8 h-8 rounded bg-primary shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-[16px]">smart_toy</span>
+</div>
+<div class="flex flex-col gap-xs w-full">
+<div class="flex items-center gap-sm">
+<span class="text-label-caps font-label-caps text-on-surface-variant">ForgeOne Core Agent</span>
+<span class="px-[6px] py-[2px] bg-[#EDEDED] text-[#6B6B6B] rounded text-[10px] font-mono">Executing</span>
+</div>
+<div class="bg-surface-container-lowest border border-[#EBEBE8] rounded p-[16px] shadow-[0px_4px_20px_rgba(0,0,0,0.04)] flex flex-col gap-md">
+<p class="text-body-lg font-body-lg text-on-surface leading-relaxed">
+                                Certainly. I will write a script utilizing the standard library to fetch the metrics from the MCP endpoint and parse them into a markdown table.
+                            </p>
+<!-- Code Block -->
+<div class="relative group border border-surface-variant rounded bg-[#FDFDFD] overflow-hidden">
+<div class="flex items-center justify-between px-sm py-[8px] border-b border-surface-variant bg-surface-container-low">
+<span class="text-label-caps font-label-caps text-on-surface-variant">Python</span>
+<button class="opacity-0 group-hover:opacity-100 transition-opacity p-[4px] rounded hover:bg-surface-variant text-on-surface-variant flex items-center gap-[4px]">
+<span class="material-symbols-outlined text-[14px]">content_copy</span>
+<span class="text-[10px] font-label-caps">COPY</span>
+</button>
+</div>
+<pre class="p-sm overflow-x-auto custom-scrollbar"><code class="text-code-sm font-code-sm text-on-surface whitespace-pre">import json
+import urllib.request
+from typing import List, Dict
+
+def fetch_mcp_metrics(endpoint_url: str) -&gt; List[Dict]:
+    """Fetches metric data from the MCP cluster."""
+    try:
+        req = urllib.request.Request(endpoint_url, headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            return data.get('metrics', [])
+    except Exception as e:
+        print(f"Error fetching metrics: {e}")
+        return []
+
+def format_markdown_table(metrics: List[Dict]) -&gt; str:
+    if not metrics: return "No data available."
+    
+    headers = list(metrics[0].keys())
+    header_row = "| " + " | ".join(headers) + " |"
+    separator_row = "|" + "|".join(["---" for _ in headers]) + "|"
+    
+    rows = []
+    for m in metrics:
+        rows.append("| " + " | ".join(str(m.get(h, '')) for h in headers) + " |")
+        
+    return "\n".join([header_row, separator_row] + rows)
+
+# Example Usage
+# url = "http://mcp-cluster.local/api/v1/metrics"
+# data = fetch_mcp_metrics(url)
+# print(format_markdown_table(data))</code></pre>
+</div>
+<p class="text-body-lg font-body-lg text-on-surface leading-relaxed">
+                                This script avoids external dependencies by using <code>urllib</code>. Would you like me to execute this against a specific endpoint or integrate it into a larger workflow?
+                            </p>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Input Area (Fixed Bottom) -->
+<div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background via-background to-transparent pt-xl pb-lg px-lg z-20">
+<div class="max-w-[800px] mx-auto">
+<div class="chat-input bg-[#F3F3F1] rounded border border-transparent flex flex-col transition-all duration-200">
+<!-- Text Area -->
+<textarea class="w-full bg-transparent border-none focus:ring-0 resize-none p-[16px] text-body-lg font-body-lg text-on-surface placeholder:text-on-surface-variant min-h-[60px] max-h-[200px] custom-scrollbar" oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'" placeholder="Message ForgeOne..." rows="1"></textarea>
+<!-- Toolbar -->
+<div class="flex items-center justify-between px-[12px] pb-[12px] pt-[4px]">
+<!-- Left Tools -->
+<div class="flex items-center gap-[4px]">
+<button class="p-[6px] rounded hover:bg-surface-variant text-on-surface-variant transition-colors flex items-center justify-center tooltip-trigger" title="Attach File">
+<span class="material-symbols-outlined text-[20px]">attach_file</span>
+</button>
+<button class="p-[6px] rounded hover:bg-surface-variant text-on-surface-variant transition-colors flex items-center justify-center" title="Code Snippet">
+<span class="material-symbols-outlined text-[20px]">data_object</span>
+</button>
+<div class="w-[1px] h-4 bg-outline-variant mx-[4px]"></div>
+<!-- Model Selector -->
+<button class="flex items-center gap-[4px] px-[8px] py-[4px] rounded hover:bg-surface-variant text-on-surface-variant transition-colors">
+<span class="material-symbols-outlined text-[16px]">psychology</span>
+<span class="text-[12px] font-body-md font-medium">GPT-4o</span>
+<span class="material-symbols-outlined text-[16px]">expand_more</span>
+</button>
+</div>
+<!-- Right Tools (Send) -->
+<button class="w-[32px] h-[32px] rounded bg-primary text-on-primary flex items-center justify-center hover:bg-inverse-surface transition-colors active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+<span class="material-symbols-outlined text-[18px]">arrow_upward</span>
+</button>
+</div>
+</div>
+<div class="text-center mt-xs">
+<p class="text-[11px] text-on-surface-variant font-body-md">ForgeOne may produce inaccurate information about people, places, or facts.</p>
+</div>
+</div>
+</div>
+</main>
+</body></html>

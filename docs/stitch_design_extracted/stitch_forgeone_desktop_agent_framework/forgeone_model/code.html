@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>ForgeOne - Model Configuration</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=Geist:wght@450&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-primary-fixed-variant": "#474647",
+                        "on-tertiary": "#ffffff",
+                        "surface-container-lowest": "#ffffff",
+                        "on-surface-variant": "#46474a",
+                        "surface-container-low": "#f4f4f2",
+                        "surface-container": "#eeeeec",
+                        "inverse-surface": "#2f3130",
+                        "on-secondary-fixed": "#1b1c1c",
+                        "on-background": "#1a1c1b",
+                        "primary": "#000000",
+                        "secondary": "#5e5e5e",
+                        "surface-variant": "#e2e3e1",
+                        "on-error-container": "#93000a",
+                        "surface-container-highest": "#e2e3e1",
+                        "on-tertiary-container": "#838484",
+                        "on-error": "#ffffff",
+                        "primary-fixed": "#e5e2e3",
+                        "secondary-fixed-dim": "#c7c6c6",
+                        "primary-fixed-dim": "#c8c6c7",
+                        "on-surface": "#1a1c1b",
+                        "on-primary": "#ffffff",
+                        "inverse-on-surface": "#f1f1ef",
+                        "background": "#f9f9f7",
+                        "on-tertiary-fixed-variant": "#454747",
+                        "tertiary-fixed-dim": "#c6c6c6",
+                        "tertiary": "#000000",
+                        "outline": "#76777b",
+                        "inverse-primary": "#c8c6c7",
+                        "outline-variant": "#c7c6ca",
+                        "on-secondary": "#ffffff",
+                        "on-secondary-fixed-variant": "#464747",
+                        "surface": "#f9f9f7",
+                        "surface-container-high": "#e8e8e6",
+                        "error-container": "#ffdad6",
+                        "tertiary-container": "#1a1c1c",
+                        "on-tertiary-fixed": "#1a1c1c",
+                        "secondary-fixed": "#e4e2e2",
+                        "secondary-container": "#e1dfdf",
+                        "on-secondary-container": "#626262",
+                        "surface-bright": "#f9f9f7",
+                        "surface-tint": "#5f5e5f",
+                        "surface-dim": "#dadad8",
+                        "primary-container": "#1b1b1c",
+                        "on-primary-container": "#858384",
+                        "on-primary-fixed": "#1b1b1c",
+                        "error": "#ba1a1a",
+                        "tertiary-fixed": "#e2e2e2"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "lg": "32px",
+                        "xl": "48px",
+                        "sidebar-width": "260px",
+                        "container-max": "1200px",
+                        "md": "20px",
+                        "xs": "8px",
+                        "base": "4px",
+                        "sm": "12px"
+                    },
+                    "fontFamily": {
+                        "label-caps": ["Inter"],
+                        "display": ["Inter"],
+                        "body-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-md": ["Inter"],
+                        "code-sm": ["Geist"]
+                    },
+                    "fontSize": {
+                        "label-caps": ["11px", { "lineHeight": "1", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "display": ["32px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                        "body-md": ["14px", { "lineHeight": "1.5", "letterSpacing": "0", "fontWeight": "400" }],
+                        "body-lg": ["16px", { "lineHeight": "1.6", "letterSpacing": "0", "fontWeight": "400" }],
+                        "headline-md": ["20px", { "lineHeight": "1.4", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+                        "code-sm": ["13px", { "lineHeight": "1.6", "letterSpacing": "0", "fontWeight": "450" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .flat-plus-shadow {
+            box-shadow: 0px 4px 20px rgba(0, 0, 0, 0.04);
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-md min-h-screen flex">
+<!-- SideNavBar -->
+<nav class="fixed left-0 top-0 h-full w-sidebar-width bg-surface-container-low dark:bg-surface-container-lowest flex flex-col border-r border-surface-variant dark:border-outline-variant z-20">
+<div class="p-lg flex items-center gap-xs">
+<span class="material-symbols-outlined text-primary text-2xl" data-weight="fill">token</span>
+<div>
+<div class="text-headline-md font-headline-md font-bold text-on-surface dark:text-on-surface">ForgeOne</div>
+<div class="text-label-caps font-label-caps text-on-surface-variant">v1.2.0</div>
+</div>
+</div>
+<div class="px-md pb-md">
+<button class="w-full bg-primary text-on-primary py-[8px] px-[16px] rounded flex items-center justify-center gap-xs transition-colors duration-150 cursor-pointer active:scale-95 hover:bg-surface-tint">
+<span class="material-symbols-outlined text-sm">add</span>
+<span class="text-body-md font-body-md">New Agent</span>
+</button>
+</div>
+<div class="flex-1 overflow-y-auto px-md py-sm flex flex-col gap-base">
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="chat">chat</span>
+<span class="text-body-md font-body-md">Chat</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="folder_open">folder_open</span>
+<span class="text-body-md font-body-md">Projects</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded bg-surface-container-highest dark:bg-surface-container-high text-on-surface font-semibold cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="smart_toy">smart_toy</span>
+<span class="text-body-md font-body-md">Models</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="extension">extension</span>
+<span class="text-body-md font-body-md">MCP</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="construction">construction</span>
+<span class="text-body-md font-body-md">Skills</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="policy">policy</span>
+<span class="text-body-md font-body-md">Policies</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="analytics">analytics</span>
+<span class="text-body-md font-body-md">Traces</span>
+</a>
+</div>
+<div class="p-md border-t border-surface-variant dark:border-outline-variant flex flex-col gap-base">
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="text-body-md font-body-md">Settings</span>
+</a>
+<a class="flex items-center gap-sm px-sm py-[8px] rounded text-on-surface-variant hover:bg-surface-container transition-colors duration-150 cursor-pointer active:scale-95" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="text-body-md font-body-md">Support</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Area -->
+<div class="flex-1 ml-sidebar-width flex flex-col min-h-screen">
+<!-- TopAppBar -->
+<header class="flex justify-between items-center h-16 px-lg bg-surface border-b border-surface-variant dark:border-outline-variant sticky top-0 z-10">
+<div class="flex-1 flex items-center">
+<div class="relative w-64">
+<span class="material-symbols-outlined absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant text-sm">search</span>
+<input class="w-full bg-surface-container-low border-none rounded py-[6px] pl-[36px] pr-sm text-body-md font-body-md focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary transition-all duration-200" placeholder="Search models..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-sm">
+<button class="p-xs text-on-surface-variant hover:bg-surface-container-low rounded-full transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button class="p-xs text-on-surface-variant hover:bg-surface-container-low rounded-full transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="cloud_done">cloud_done</span>
+</button>
+<button class="p-xs text-on-surface-variant hover:bg-surface-container-low rounded-full transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="account_circle">account_circle</span>
+</button>
+</div>
+</header>
+<!-- Canvas -->
+<main class="flex-1 p-lg overflow-y-auto">
+<div class="max-w-container-max mx-auto space-y-lg">
+<div class="flex justify-between items-end">
+<div>
+<h1 class="text-display font-display text-on-surface">Model Configuration</h1>
+<p class="text-body-lg font-body-lg text-on-surface-variant mt-xs">Manage LLM providers, API keys, and default parameters for your agents.</p>
+</div>
+<div class="flex gap-sm">
+<button class="border border-surface-variant text-on-surface bg-surface-container-lowest py-[8px] px-[16px] rounded text-body-md font-body-md hover:bg-surface-container transition-colors">Discard Changes</button>
+<button class="bg-primary text-on-primary py-[8px] px-[16px] rounded text-body-md font-body-md hover:bg-surface-tint transition-colors">Save Configuration</button>
+</div>
+</div>
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-md">
+<!-- Left Column: Provider Selection & Keys -->
+<div class="xl:col-span-2 space-y-md">
+<!-- Active Provider Card -->
+<div class="bg-surface-container-lowest border border-surface-variant rounded-xl p-lg flat-plus-shadow">
+<div class="flex items-center justify-between mb-md border-b border-surface-variant pb-sm">
+<h2 class="text-headline-md font-headline-md text-on-surface flex items-center gap-sm">
+<span class="material-symbols-outlined">api</span>
+                                    Provider Connection
+                                </h2>
+<span class="bg-[#EDEDED] text-[#6B6B6B] px-xs py-base rounded text-label-caps font-label-caps">Active</span>
+</div>
+<div class="space-y-md">
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant mb-base">Select Provider</label>
+<div class="grid grid-cols-3 gap-sm">
+<div class="border border-primary bg-surface-container-lowest rounded p-sm flex items-center justify-center cursor-pointer">
+<span class="font-semibold">OpenAI</span>
+</div>
+<div class="border border-surface-variant bg-surface-container-lowest hover:bg-surface-container-low rounded p-sm flex items-center justify-center cursor-pointer transition-colors">
+<span>Anthropic</span>
+</div>
+<div class="border border-surface-variant bg-surface-container-lowest hover:bg-surface-container-low rounded p-sm flex items-center justify-center cursor-pointer transition-colors">
+<span>Local / Custom</span>
+</div>
+</div>
+</div>
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant mb-base">API Key</label>
+<div class="relative">
+<input class="w-full bg-[#F3F3F1] border-none rounded py-sm px-sm text-code-sm font-code-sm focus:bg-surface-container-lowest focus:ring-1 focus:ring-[#2D63ED] transition-all duration-200" type="password" value="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"/>
+<button class="absolute right-sm top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface">
+<span class="material-symbols-outlined text-sm">visibility</span>
+</button>
+</div>
+<p class="text-[12px] text-on-surface-variant mt-base">Your key is encrypted and stored securely.</p>
+</div>
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant mb-base">Base URL (Optional)</label>
+<input class="w-full bg-[#F3F3F1] border-none rounded py-sm px-sm text-body-md font-body-md focus:bg-surface-container-lowest focus:ring-1 focus:ring-[#2D63ED] transition-all duration-200" placeholder="https://api.openai.com/v1" type="text"/>
+</div>
+</div>
+</div>
+<!-- Model Selection Card -->
+<div class="bg-surface-container-lowest border border-surface-variant rounded-xl p-lg">
+<div class="flex items-center justify-between mb-md border-b border-surface-variant pb-sm">
+<h2 class="text-headline-md font-headline-md text-on-surface flex items-center gap-sm">
+<span class="material-symbols-outlined">memory</span>
+                                    Model Selection
+                                </h2>
+</div>
+<div class="space-y-md">
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant mb-base">Default Model</label>
+<select class="w-full bg-[#F3F3F1] border-none rounded py-sm px-sm text-body-md font-body-md focus:bg-surface-container-lowest focus:ring-1 focus:ring-[#2D63ED] transition-all duration-200 appearance-none">
+<option>gpt-4-turbo-preview</option>
+<option>gpt-4</option>
+<option>gpt-3.5-turbo</option>
+</select>
+</div>
+<div class="bg-surface-container-low p-sm rounded border border-surface-variant flex gap-sm items-start">
+<span class="material-symbols-outlined text-on-surface-variant mt-[2px]">info</span>
+<p class="text-body-md font-body-md text-on-surface-variant">The default model is used when agents do not explicitly specify a model in their configuration.</p>
+</div>
+</div>
+</div>
+</div>
+<!-- Right Column: Parameters -->
+<div class="space-y-md">
+<div class="bg-surface-container-lowest border border-surface-variant rounded-xl p-lg">
+<div class="mb-md border-b border-surface-variant pb-sm">
+<h2 class="text-headline-md font-headline-md text-on-surface flex items-center gap-sm">
+<span class="material-symbols-outlined">tune</span>
+                                    Parameters
+                                </h2>
+</div>
+<div class="space-y-lg">
+<!-- Temperature -->
+<div>
+<div class="flex justify-between items-center mb-sm">
+<label class="text-body-md font-body-md text-on-surface-variant">Temperature</label>
+<span class="bg-[#F3F3F1] px-xs py-base rounded text-code-sm font-code-sm border border-surface-variant">0.7</span>
+</div>
+<input class="w-full accent-primary" max="2" min="0" step="0.1" type="range" value="0.7"/>
+<div class="flex justify-between text-label-caps font-label-caps text-on-surface-variant mt-base">
+<span>Precise</span>
+<span>Creative</span>
+</div>
+</div>
+<!-- Top P -->
+<div>
+<div class="flex justify-between items-center mb-sm">
+<label class="text-body-md font-body-md text-on-surface-variant">Top P</label>
+<span class="bg-[#F3F3F1] px-xs py-base rounded text-code-sm font-code-sm border border-surface-variant">1.0</span>
+</div>
+<input class="w-full accent-primary" max="1" min="0" step="0.05" type="range" value="1.0"/>
+</div>
+<!-- Max Tokens -->
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant mb-base">Max Tokens</label>
+<input class="w-full bg-[#F3F3F1] border-none rounded py-sm px-sm text-body-md font-body-md focus:bg-surface-container-lowest focus:ring-1 focus:ring-[#2D63ED] transition-all duration-200" type="number" value="4096"/>
+</div>
+<!-- Context Window -->
+<div>
+<div class="flex items-center justify-between">
+<div>
+<label class="block text-body-md font-body-md text-on-surface-variant">Auto-truncate Context</label>
+<p class="text-[12px] text-on-surface-variant">Prevent exceeding limits</p>
+</div>
+<div class="w-10 h-5 bg-primary rounded-full relative cursor-pointer">
+<div class="absolute right-[2px] top-[2px] w-4 h-4 bg-surface-container-lowest rounded-full"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- System Prompt Snippet -->
+<div class="bg-[#FDFDFD] border border-surface-variant rounded-xl overflow-hidden relative group">
+<div class="bg-surface-container-low px-sm py-[8px] border-b border-surface-variant flex justify-between items-center">
+<span class="text-label-caps font-label-caps text-on-surface-variant">DEFAULT SYSTEM PROMPT</span>
+<button class="opacity-0 group-hover:opacity-100 transition-opacity text-on-surface-variant hover:text-on-surface">
+<span class="material-symbols-outlined text-[16px]">content_copy</span>
+</button>
+</div>
+<div class="p-sm text-code-sm font-code-sm text-on-surface-variant">
+<pre class="whitespace-pre-wrap">You are ForgeOne, an intelligent agent framework.
+Maintain a helpful, concise, and technical tone.
+Always output valid JSON when requested.</pre>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+</body></html>
