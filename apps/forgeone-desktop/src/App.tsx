@@ -866,11 +866,36 @@ export default function App() {
     }
   };
 
+  const handleClearHistory = async () => {
+    if (confirm(lang === 'zh' ? '确定要清空所有会话历史记录吗？这会清除上下文并重置智能体状态。' : 'Are you sure you want to clear all session history? This will clear context and reset the agent state.')) {
+      try {
+        if ((window as any).forgeone) {
+          await (window as any).forgeone.pruneTraces();
+          await (window as any).forgeone.prunePending();
+        }
+        setMessages([]);
+        setSelectedSessionId(null);
+        setTracesList([]);
+        alert(lang === 'zh' ? '会话历史已清空！' : 'Session history cleared!');
+      } catch (err) {
+        console.error('Failed to clear history:', err);
+        setMessages([]);
+        setSelectedSessionId(null);
+        setTracesList([]);
+      }
+    }
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim() || isRunning) return;
 
     const taskToSend = inputText;
+    if (taskToSend.trim() === '/clear') {
+      setInputText('');
+      handleClearHistory();
+      return;
+    }
     setInputText('');
     setIsRunning(true);
 
@@ -1439,7 +1464,17 @@ export default function App() {
           <div className="chat-page-layout">
             {/* 二级历史会话边栏 */}
             <div className="chat-history-sidebar">
-              <div className="chat-history-header">{t.traceListCard}</div>
+              <div className="chat-history-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                <span>{t.traceListCard}</span>
+                <button 
+                  className="top-btn" 
+                  title={lang === 'zh' ? '清空历史记录 (/clear)' : 'Clear History (/clear)'}
+                  style={{ padding: '4px', display: 'inline-flex', borderRadius: '4px', color: 'var(--error-color)', cursor: 'pointer' }}
+                  onClick={handleClearHistory}
+                >
+                  <Icon name="delete_sweep" style={{ fontSize: '16px' }} />
+                </button>
+              </div>
               <div className="chat-history-list custom-scrollbar">
                 {tracesList.length === 0 ? (
                   <div style={{ padding: '16px', textAlign: 'center', color: 'var(--on-surface-variant)', fontSize: '12px' }}>
