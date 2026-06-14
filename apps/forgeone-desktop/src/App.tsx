@@ -785,6 +785,8 @@ export default function App() {
 
   const activeProfile = profiles.find(p => p.id === activeProfileId);
 
+  const [showMiniSelector, setShowMiniSelector] = useState(false);
+
   // 编辑状态: null -> 主页列表, 'new' -> 新建, 字符串(id) -> 编辑现有
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
 
@@ -1566,9 +1568,94 @@ export default function App() {
                         </button>
                         <div className="toolbar-divider"></div>
                         {/* 极简模型切换浮层 */}
-                        <div className="mini-model-selector" onClick={() => setActiveTab('model')}>
-                          <Icon name="psychology" className="icon" style={{ marginRight: '4px' }} />
-                          <span>{activeProfile ? activeProfile.name : (lang === 'zh' ? '选择模型' : 'Select Model')}</span>
+                        <div style={{ position: 'relative' }}>
+                          <div 
+                            className="mini-model-selector" 
+                            style={{ 
+                              backgroundColor: showMiniSelector ? 'var(--surface-container-high)' : 'transparent',
+                              border: '1px solid var(--border-color)',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px'
+                            }}
+                            onClick={() => setShowMiniSelector(!showMiniSelector)}
+                          >
+                            <Icon name="psychology" className="icon" style={{ fontSize: '15px' }} />
+                            <span>{activeProfile ? activeProfile.name : (lang === 'zh' ? '选择模型' : 'Select Model')}</span>
+                            <span style={{ fontSize: '9px', opacity: 0.7, transform: showMiniSelector ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                          </div>
+
+                          {showMiniSelector && (
+                            <>
+                              {/* 点击遮罩，用于关闭下拉框 */}
+                              <div 
+                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} 
+                                onClick={() => setShowMiniSelector(false)}
+                              />
+                              {/* 弹出卡片 */}
+                              <div 
+                                className="card-bento"
+                                style={{ 
+                                  position: 'absolute', 
+                                  bottom: 'calc(100% + 8px)', 
+                                  left: 0, 
+                                  minWidth: '260px',
+                                  maxWidth: '320px',
+                                  padding: '8px', 
+                                  zIndex: 999, 
+                                  display: 'flex', 
+                                  flexDirection: 'column', 
+                                  gap: '4px',
+                                  boxShadow: 'var(--shadow-lg)',
+                                  backgroundColor: 'var(--surface-lowest)',
+                                  border: '1px solid var(--border-color)'
+                                }}
+                              >
+                                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--on-surface-variant)', padding: '6px 8px 4px', borderBottom: '1px solid var(--border-color)', marginBottom: '4px' }}>
+                                  {lang === 'zh' ? '快速切换当前模型' : 'Switch Active Model'}
+                                </div>
+                                <div style={{ maxHeight: '200px', overflowY: 'auto' }} className="custom-scrollbar">
+                                  {profiles.map((profile) => {
+                                    const isSel = profile.id === activeProfileId;
+                                    return (
+                                      <div 
+                                        key={profile.id}
+                                        style={{ 
+                                          display: 'flex', 
+                                          alignItems: 'center', 
+                                          justifyContent: 'space-between',
+                                          padding: '8px 10px', 
+                                          borderRadius: '6px', 
+                                          cursor: 'pointer',
+                                          backgroundColor: isSel ? 'var(--surface-container-high)' : 'transparent',
+                                          transition: 'all 0.15s'
+                                        }}
+                                        onClick={() => {
+                                          setActiveProfileId(profile.id);
+                                          setShowMiniSelector(false);
+                                        }}
+                                        className="mini-model-item"
+                                      >
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', textAlign: 'left' }}>
+                                          <span style={{ fontSize: '13px', fontWeight: isSel ? 600 : 500, color: isSel ? 'var(--accent-color)' : 'var(--on-surface)' }}>
+                                            {profile.name}
+                                          </span>
+                                          <span style={{ fontSize: '10px', color: 'var(--on-surface-variant)', opacity: 0.8 }}>
+                                            {profile.modelId} ({profile.protocol.toUpperCase()})
+                                          </span>
+                                        </div>
+                                        {isSel && (
+                                          <Icon name="check" style={{ color: 'var(--accent-color)', fontSize: '16px' }} />
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                       <div className="chat-toolbar-right">

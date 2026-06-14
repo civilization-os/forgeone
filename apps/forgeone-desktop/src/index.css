@@ -1714,3 +1714,7 @@ body.dark-theme .modal-card {
   transform: scale(0.98);
 }
 
+.mini-model-item:hover {
+  background-color: var(--surface-container-high) !important;
+}
+
