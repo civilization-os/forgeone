@@ -657,6 +657,27 @@ function Icon({ name, className = '', style = {} }: { name: string; className?: 
   );
 }
 
+interface OfficialVendor {
+  key: string;
+  name: string;
+  protocol: 'openai' | 'anthropic';
+  baseUrl: string;
+  defaultModelId: string;
+  placeholderKey: string;
+  models: string[];
+}
+
+const OFFICIAL_VENDORS: OfficialVendor[] = [
+  { key: 'OpenAI', name: 'OpenAI', protocol: 'openai', baseUrl: 'https://api.openai.com/v1', defaultModelId: 'gpt-4o', placeholderKey: 'sk-proj-...', models: ['gpt-4o', 'gpt-4o-mini', 'o1-preview', 'o1-mini', 'gpt-4-turbo'] },
+  { key: 'Anthropic', name: 'Anthropic (Claude)', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', defaultModelId: 'claude-3-5-sonnet', placeholderKey: 'sk-ant-...', models: ['claude-3-5-sonnet', 'claude-3-opus', 'claude-3-5-haiku'] },
+  { key: 'DeepSeek', name: 'DeepSeek', protocol: 'openai', baseUrl: 'https://api.deepseek.com', defaultModelId: 'deepseek-chat', placeholderKey: 'sk-...', models: ['deepseek-chat', 'deepseek-coder'] },
+  { key: 'Minimax', name: 'MiniMax', protocol: 'openai', baseUrl: 'https://api.minimax.chat/v1', defaultModelId: 'abab6.5g-chat', placeholderKey: 'ey...', models: ['abab6.5g-chat', 'abab6.5t-chat', 'abab6.5-chat'] },
+  { key: 'Gemini', name: 'Google Gemini', protocol: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', defaultModelId: 'gemini-1.5-pro', placeholderKey: 'AIzaSy...', models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro'] },
+  { key: 'Groq', name: 'Groq', protocol: 'openai', baseUrl: 'https://api.groq.com/openai/v1', defaultModelId: 'llama3-70b-8192', placeholderKey: 'gsk_...', models: ['llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
+  { key: 'Mistral', name: 'Mistral AI', protocol: 'openai', baseUrl: 'https://api.mistral.ai/v1', defaultModelId: 'mistral-large-latest', placeholderKey: '...', models: ['mistral-large-latest', 'open-mixtral-8x22b', 'mistral-small-latest'] },
+  { key: 'OpenRouter', name: 'OpenRouter', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', defaultModelId: 'google/gemini-pro', placeholderKey: 'sk-or-...', models: ['google/gemini-pro', 'meta-llama/llama-3-8b-instruct', 'anthropic/claude-3.5-sonnet'] }
+];
+
 export default function App() {
   // 核心板块切换状态：'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'
   const [activeTab, setActiveTab] = useState<'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'>('chat');
@@ -1096,7 +1117,9 @@ export default function App() {
       type: formType,
       protocol: formProtocol,
       provider: formProvider,
-      baseUrl: formType === 'official' ? (formProvider === 'OpenAI' ? 'https://api.openai.com/v1' : 'https://api.anthropic.com/v1') : formBaseUrl,
+      baseUrl: formType === 'official' 
+        ? (OFFICIAL_VENDORS.find(v => v.key === formProvider)?.baseUrl || 'https://api.openai.com/v1') 
+        : formBaseUrl,
       apiKey: formApiKey,
       modelId: formModelId,
       authScript: formType === 'custom_script' ? formAuthScript : undefined,
@@ -1921,19 +1944,17 @@ export default function App() {
                               onChange={(e) => {
                                 const prov = e.target.value;
                                 setFormProvider(prov);
-                                if (prov === 'OpenAI') {
-                                  setFormProtocol('openai');
-                                  setFormBaseUrl('https://api.openai.com/v1');
-                                  setFormModelId('gpt-4o');
-                                } else {
-                                  setFormProtocol('anthropic');
-                                  setFormBaseUrl('https://api.anthropic.com/v1');
-                                  setFormModelId('claude-3-5-sonnet');
+                                const vendor = OFFICIAL_VENDORS.find(v => v.key === prov);
+                                if (vendor) {
+                                  setFormProtocol(vendor.protocol);
+                                  setFormBaseUrl(vendor.baseUrl);
+                                  setFormModelId(vendor.defaultModelId);
                                 }
                               }}
                             >
-                              <option value="OpenAI">OpenAI</option>
-                              <option value="Anthropic">Anthropic (Claude)</option>
+                              {OFFICIAL_VENDORS.map(v => (
+                                <option key={v.key} value={v.key}>{v.name}</option>
+                              ))}
                             </select>
                           </div>
 
@@ -1943,7 +1964,7 @@ export default function App() {
                               <input 
                                 type={showFormApiKey ? 'text' : 'password'} 
                                 className="form-input-text"
-                                placeholder={formProvider === 'OpenAI' ? 'sk-proj-...' : 'sk-ant-...'}
+                                placeholder={OFFICIAL_VENDORS.find(v => v.key === formProvider)?.placeholderKey || 'API Key'}
                                 value={formApiKey}
                                 onChange={(e) => setFormApiKey(e.target.value)}
                               />
@@ -1964,20 +1985,9 @@ export default function App() {
                               value={formModelId}
                               onChange={(e) => setFormModelId(e.target.value)}
                             >
-                              {formProvider === 'OpenAI' ? (
-                                <>
-                                  <option value="gpt-4o">gpt-4o</option>
-                                  <option value="gpt-4o-mini">gpt-4o-mini</option>
-                                  <option value="o1-preview">o1-preview</option>
-                                  <option value="gpt-4-turbo">gpt-4-turbo</option>
-                                </>
-                              ) : (
-                                <>
-                                  <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
-                                  <option value="claude-3-opus">claude-3-opus</option>
-                                  <option value="claude-3-haiku">claude-3-haiku</option>
-                                </>
-                              )}
+                              {(OFFICIAL_VENDORS.find(v => v.key === formProvider)?.models || ['gpt-4o']).map(m => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
                             </select>
                           </div>
                         </div>
