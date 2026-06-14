@@ -1070,12 +1070,20 @@ export default function App() {
         }
       }
 
+      let method = 'POST';
+      let body = '';
+
       if (profile.protocol === 'openai') {
         const cleanBase = url.replace(/\/$/, '');
-        url = `${cleanBase}/models`;
+        url = `${cleanBase}/chat/completions`;
         if (profile.apiKey && !headers['Authorization']) {
           headers['Authorization'] = `Bearer ${profile.apiKey}`;
         }
+        body = JSON.stringify({
+          model: profile.modelId,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1
+        });
       } else if (profile.protocol === 'anthropic') {
         const cleanBase = url.replace(/\/$/, '');
         url = `${cleanBase}/v1/messages`;
@@ -1083,18 +1091,15 @@ export default function App() {
           headers['x-api-key'] = profile.apiKey;
           headers['anthropic-version'] = '2023-06-01';
         }
+        body = JSON.stringify({
+          model: profile.modelId,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1
+        });
       }
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000); // 8秒超时
-
-      const isAnthropic = profile.protocol === 'anthropic';
-      const method = isAnthropic ? 'POST' : 'GET';
-      const body = isAnthropic ? JSON.stringify({
-        model: profile.modelId,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1
-      }) : undefined;
 
       const response = await fetch(url, {
         method,
