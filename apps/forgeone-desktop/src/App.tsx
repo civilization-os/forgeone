@@ -992,12 +992,95 @@ export default function App() {
     setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
   };
 
-  const handleTestConnection = (id: string) => {
+  const handleTestConnection = async (id: string) => {
+    const profile = profiles.find(p => p.id === id);
+    if (!profile) return;
+
     setConnectionStatus(prev => ({ ...prev, [id]: { status: 'testing' } }));
-    setTimeout(() => {
-      const delay = Math.floor(Math.random() * 200) + 50;
-      setConnectionStatus(prev => ({ ...prev, [id]: { status: 'success', delay } }));
-    }, 1000);
+    const startTime = Date.now();
+
+    try {
+      let url = profile.baseUrl || '';
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+
+      // 处理自定义脚本鉴权以获取自定义 Headers
+      if (profile.type === 'custom_script' && profile.authScript) {
+        try {
+          const runScript = new Function(`
+            return (async () => {
+              ${profile.authScript}
+              if (typeof getAuthHeaders === 'function') {
+                return await getAuthHeaders();
+              }
+              return {};
+            })();
+          `);
+          const customHeaders = await runScript();
+          if (customHeaders && typeof customHeaders === 'object') {
+            Object.assign(headers, customHeaders);
+          }
+        } catch (scriptErr) {
+          console.error('Failed to execute auth script:', scriptErr);
+        }
+      }
+
+      if (profile.protocol === 'openai') {
+        const cleanBase = url.replace(/\/$/, '');
+        url = `${cleanBase}/models`;
+        if (profile.apiKey && !headers['Authorization']) {
+          headers['Authorization'] = `Bearer ${profile.apiKey}`;
+        }
+      } else if (profile.protocol === 'anthropic') {
+        const cleanBase = url.replace(/\/$/, '');
+        url = `${cleanBase}/v1/messages`;
+        if (profile.apiKey) {
+          headers['x-api-key'] = profile.apiKey;
+          headers['anthropic-version'] = '2023-06-01';
+        }
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8秒超时
+
+      const isAnthropic = profile.protocol === 'anthropic';
+      const method = isAnthropic ? 'POST' : 'GET';
+      const body = isAnthropic ? JSON.stringify({
+        model: profile.modelId,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1
+      }) : undefined;
+
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      const delay = Date.now() - startTime;
+
+      // 只要服务器有响应且状态码不为 5xx (即网络通畅，即使是 401 Unauthorized / 400 Bad Request 也说明服务在线且可达)
+      if (response.status < 500) {
+        setConnectionStatus(prev => ({ 
+          ...prev, 
+          [id]: { status: 'success', delay } 
+        }));
+      } else {
+        setConnectionStatus(prev => ({ 
+          ...prev, 
+          [id]: { status: 'failed' } 
+        }));
+      }
+    } catch (error) {
+      console.error('Connection test failed:', error);
+      setConnectionStatus(prev => ({ 
+        ...prev, 
+        [id]: { status: 'failed' } 
+      }));
+    }
   };
 
   const handleSaveProfile = () => {
