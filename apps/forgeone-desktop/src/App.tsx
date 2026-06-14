@@ -811,6 +811,10 @@ export default function App() {
   const [formAutoTruncate, setFormAutoTruncate] = useState(true);
   const [showFormApiKey, setShowFormApiKey] = useState(false);
 
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
+
   // 持久化存储
   useEffect(() => {
     localStorage.setItem('model_profiles', JSON.stringify(profiles));
@@ -1132,6 +1136,93 @@ export default function App() {
     }
   };
 
+  const handleFetchModels = async () => {
+    setIsFetchingModels(true);
+    setFetchModelsError(null);
+    setFetchedModels([]);
+    try {
+      let url = formBaseUrl || '';
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+
+      if (formType === 'custom_script' && formAuthScript) {
+        try {
+          const runScript = new Function(`
+            return (async () => {
+              ${formAuthScript}
+              if (typeof getAuthHeaders === 'function') {
+                return await getAuthHeaders();
+              }
+              return {};
+            })();
+          `);
+          const customHeaders = await runScript();
+          if (customHeaders && typeof customHeaders === 'object') {
+            Object.assign(headers, customHeaders);
+          }
+        } catch (scriptErr) {
+          console.error('Failed to execute auth script during fetch:', scriptErr);
+        }
+      }
+
+      const cleanBase = url.replace(/\/$/, '');
+      let fetchUrl = `${cleanBase}/models`;
+
+      if (formProtocol === 'openai') {
+        if (formApiKey && !headers['Authorization']) {
+          headers['Authorization'] = `Bearer ${formApiKey}`;
+        }
+      } else if (formProtocol === 'anthropic') {
+        fetchUrl = `${cleanBase}/v1/models`;
+        if (formApiKey) {
+          headers['x-api-key'] = formApiKey;
+          headers['anthropic-version'] = '2023-06-01';
+        }
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+      const response = await fetch(fetchUrl, {
+        method: 'GET',
+        headers,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} - ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      let modelsList: string[] = [];
+      if (data && Array.isArray(data.data)) {
+        modelsList = data.data.map((m: any) => m.id);
+      } else if (data && Array.isArray(data.models)) {
+        modelsList = data.models.map((m: any) => m.name || m.id);
+      } else if (data && Array.isArray(data)) {
+        modelsList = data.map((m: any) => typeof m === 'string' ? m : (m.id || m.name));
+      } else if (data && typeof data === 'object') {
+        const possibleArray = Object.values(data).find(v => Array.isArray(v));
+        if (possibleArray) {
+          modelsList = possibleArray.map((m: any) => typeof m === 'string' ? m : (m.id || m.name || m.model));
+        }
+      }
+
+      modelsList = modelsList.filter(Boolean).map(String);
+      if (modelsList.length === 0) {
+        throw new Error(lang === 'zh' ? '未检测到可用模型列表，请确认地址与密钥是否正确。' : 'No models detected in the response.');
+      }
+      setFetchedModels(modelsList);
+    } catch (err: any) {
+      console.error('Failed to fetch models:', err);
+      setFetchModelsError(err.message || String(err));
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
+
   const handleSaveProfile = () => {
     if (!formName.trim()) {
       alert(lang === 'zh' ? '请填写配置名称' : 'Please fill config name');
@@ -1170,6 +1261,8 @@ export default function App() {
   };
 
   const handleStartEdit = (profile: ModelProfile) => {
+    setFetchedModels([]);
+    setFetchModelsError(null);
     setEditingProfileId(profile.id);
     setFormName(profile.name);
     setFormType(profile.type);
@@ -1186,6 +1279,8 @@ export default function App() {
   };
 
   const handleStartNew = () => {
+    setFetchedModels([]);
+    setFetchModelsError(null);
     setEditingProfileId('new');
     setFormName('');
     setFormType('official');
@@ -2106,16 +2201,86 @@ export default function App() {
                           </div>
 
                           <div className="form-group">
-                            <label className="form-label">{lang === 'zh' ? '当前默认模型' : 'Default Model'}</label>
-                            <select 
-                              className="form-select"
-                              value={formModelId}
-                              onChange={(e) => setFormModelId(e.target.value)}
-                            >
-                              {(OFFICIAL_VENDORS.find(v => v.key === formProvider)?.models || ['gpt-4o']).map(m => (
-                                <option key={m} value={m}>{m}</option>
-                              ))}
-                            </select>
+                            <label className="form-label">{lang === 'zh' ? '模型标识 ID (Model ID)' : 'Model ID'}</label>
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                              <input 
+                                type="text" 
+                                className="form-input-text"
+                                style={{ flex: 1 }}
+                                placeholder="gpt-4o, claude-3-5-sonnet"
+                                value={formModelId}
+                                onChange={(e) => setFormModelId(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                style={{ padding: '8px 12px', fontSize: '12.5px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                onClick={handleFetchModels}
+                                disabled={isFetchingModels}
+                              >
+                                <Icon name={isFetchingModels ? 'sync' : 'search'} style={{ animation: isFetchingModels ? 'spin 1.5s linear infinite' : 'none' }} />
+                                <span>{lang === 'zh' ? '获取列表' : 'Fetch List'}</span>
+                              </button>
+                            </div>
+
+                            {/* 自动检测到的模型列表 */}
+                            {fetchedModels.length > 0 && (
+                              <div style={{ marginTop: '8px' }}>
+                                <label className="form-label" style={{ fontSize: '11px', color: 'var(--accent-color)' }}>
+                                  {lang === 'zh' ? '🔍 检测到以下可用模型 (点击可快速选择并同步限制):' : '🔍 Detected models (click to select and sync limits):'}
+                                </label>
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+                                  {fetchedModels.map(m => (
+                                    <span 
+                                      key={m} 
+                                      className="badge-tag" 
+                                      style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
+                                      onClick={() => {
+                                        setFormModelId(m);
+                                        const lower = m.toLowerCase();
+                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large')) {
+                                          setFormMaxTokens(4096);
+                                        } else {
+                                          setFormMaxTokens(2048);
+                                        }
+                                      }}
+                                    >
+                                      {m}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {fetchModelsError && (
+                              <div style={{ fontSize: '11px', color: 'var(--error-color)', marginTop: '6px' }}>
+                                ⚠️ {lang === 'zh' ? '自动检测失败: ' : 'Detection failed: '} {fetchModelsError}
+                              </div>
+                            )}
+
+                            {/* 默认推荐模型标签 */}
+                            {fetchedModels.length === 0 && (
+                              <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                {(OFFICIAL_VENDORS.find(v => v.key === formProvider)?.models || ['gpt-4o']).map(lbl => (
+                                  <span 
+                                    key={lbl} 
+                                    className="badge-tag" 
+                                    style={{ cursor: 'pointer', margin: 0, border: formModelId === lbl ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === lbl ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
+                                    onClick={() => {
+                                      setFormModelId(lbl);
+                                      const lower = lbl.toLowerCase();
+                                      if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large')) {
+                                        setFormMaxTokens(4096);
+                                      } else {
+                                        setFormMaxTokens(2048);
+                                      }
+                                    }}
+                                  >
+                                    {lbl}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
@@ -2171,26 +2336,85 @@ export default function App() {
 
                           <div className="form-group">
                             <label className="form-label">{lang === 'zh' ? '默认模型标识 ID (Model ID)' : 'Model ID'}</label>
-                            <input 
-                              type="text" 
-                              className="form-input-text"
-                              placeholder="llama3, deepseek-coder"
-                              value={formModelId}
-                              onChange={(e) => setFormModelId(e.target.value)}
-                            />
-                            {/* 快速填入标签 */}
-                            <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                              {['llama3', 'qwen2.5:7b', 'deepseek-chat', 'mistral'].map(lbl => (
-                                <span 
-                                  key={lbl} 
-                                  className="badge-tag" 
-                                  style={{ cursor: 'pointer', margin: 0 }}
-                                  onClick={() => setFormModelId(lbl)}
-                                >
-                                  {lbl}
-                                </span>
-                              ))}
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                              <input 
+                                type="text" 
+                                className="form-input-text"
+                                style={{ flex: 1 }}
+                                placeholder="llama3, deepseek-coder"
+                                value={formModelId}
+                                onChange={(e) => setFormModelId(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                style={{ padding: '8px 12px', fontSize: '12.5px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                onClick={handleFetchModels}
+                                disabled={isFetchingModels}
+                              >
+                                <Icon name={isFetchingModels ? 'sync' : 'search'} style={{ animation: isFetchingModels ? 'spin 1.5s linear infinite' : 'none' }} />
+                                <span>{lang === 'zh' ? '检测模型' : 'Detect Models'}</span>
+                              </button>
                             </div>
+
+                            {/* 自动检测到的模型列表 */}
+                            {fetchedModels.length > 0 && (
+                              <div style={{ marginTop: '8px' }}>
+                                <label className="form-label" style={{ fontSize: '11px', color: 'var(--accent-color)' }}>
+                                  {lang === 'zh' ? '🔍 检测到以下可用模型 (点击可快速选择并同步限制):' : '🔍 Detected models (click to select and sync limits):'}
+                                </label>
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+                                  {fetchedModels.map(m => (
+                                    <span 
+                                      key={m} 
+                                      className="badge-tag" 
+                                      style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
+                                      onClick={() => {
+                                        setFormModelId(m);
+                                        const lower = m.toLowerCase();
+                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b') || lower.includes('70b')) {
+                                          setFormMaxTokens(4096);
+                                        } else {
+                                          setFormMaxTokens(2048);
+                                        }
+                                      }}
+                                    >
+                                      {m}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {fetchModelsError && (
+                              <div style={{ fontSize: '11px', color: 'var(--error-color)', marginTop: '6px' }}>
+                                ⚠️ {lang === 'zh' ? '自动检测失败: ' : 'Detection failed: '} {fetchModelsError}
+                              </div>
+                            )}
+
+                            {/* 快速填入推荐标签 */}
+                            {fetchedModels.length === 0 && (
+                              <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                {['llama3', 'qwen2.5-coder:7b', 'deepseek-chat', 'mistral'].map(lbl => (
+                                  <span 
+                                    key={lbl} 
+                                    className="badge-tag" 
+                                    style={{ cursor: 'pointer', margin: 0, border: formModelId === lbl ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === lbl ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
+                                    onClick={() => {
+                                      setFormModelId(lbl);
+                                      const lower = lbl.toLowerCase();
+                                      if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b')) {
+                                        setFormMaxTokens(4096);
+                                      } else {
+                                        setFormMaxTokens(2048);
+                                      }
+                                    }}
+                                  >
+                                    {lbl}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
@@ -2245,13 +2469,61 @@ export default function App() {
 
                           <div className="form-group">
                             <label className="form-label">{lang === 'zh' ? '模型标识 ID (Model ID)' : 'Model ID'}</label>
-                            <input 
-                              type="text" 
-                              className="form-input-text"
-                              placeholder="internal-gpt-4o"
-                              value={formModelId}
-                              onChange={(e) => setFormModelId(e.target.value)}
-                            />
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                              <input 
+                                type="text" 
+                                className="form-input-text"
+                                style={{ flex: 1 }}
+                                placeholder="internal-gpt-4o"
+                                value={formModelId}
+                                onChange={(e) => setFormModelId(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                style={{ padding: '8px 12px', fontSize: '12.5px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                onClick={handleFetchModels}
+                                disabled={isFetchingModels}
+                              >
+                                <Icon name={isFetchingModels ? 'sync' : 'search'} style={{ animation: isFetchingModels ? 'spin 1.5s linear infinite' : 'none' }} />
+                                <span>{lang === 'zh' ? '检测模型' : 'Detect Models'}</span>
+                              </button>
+                            </div>
+
+                            {/* 自动检测到的模型列表 */}
+                            {fetchedModels.length > 0 && (
+                              <div style={{ marginTop: '8px' }}>
+                                <label className="form-label" style={{ fontSize: '11px', color: 'var(--accent-color)' }}>
+                                  {lang === 'zh' ? '🔍 检测到以下可用模型 (点击可快速选择并同步限制):' : '🔍 Detected models (click to select and sync limits):'}
+                                </label>
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+                                  {fetchedModels.map(m => (
+                                    <span 
+                                      key={m} 
+                                      className="badge-tag" 
+                                      style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
+                                      onClick={() => {
+                                        setFormModelId(m);
+                                        const lower = m.toLowerCase();
+                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b')) {
+                                          setFormMaxTokens(4096);
+                                        } else {
+                                          setFormMaxTokens(2048);
+                                        }
+                                      }}
+                                    >
+                                      {m}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {fetchModelsError && (
+                              <div style={{ fontSize: '11px', color: 'var(--error-color)', marginTop: '6px' }}>
+                                ⚠️ {lang === 'zh' ? '自动检测失败: ' : 'Detection failed: '} {fetchModelsError}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
