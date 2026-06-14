@@ -11,8 +11,8 @@ function startSidecar() {
   const isDev = !app.isPackaged;
   let binPath = '';
   if (isDev) {
-    // __dirname is dist-electron. target/debug is at ../../target/debug/
-    binPath = path.join(__dirname, '../../target/debug/forgeone-server.exe');
+    // __dirname is dist-electron. target/debug is at ../../../target/debug/
+    binPath = path.join(__dirname, '../../../target/debug/forgeone-server.exe');
   } else {
     binPath = path.join(process.resourcesPath, 'forgeone-server.exe');
   }
