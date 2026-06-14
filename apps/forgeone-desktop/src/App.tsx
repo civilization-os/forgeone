@@ -1761,26 +1761,36 @@ export default function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                             {/* 连接检测按钮与状态 */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginRight: '8px' }}>
-                              {conn?.status === 'testing' && (
-                                <span style={{ fontSize: '12px', color: 'var(--on-surface-variant)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                  <Icon name="sync" style={{ animation: 'spin 2s linear infinite' }} />
-                                  {lang === 'zh' ? '测试中...' : 'Testing...'}
-                                </span>
-                              )}
+                              {/* 延迟/状态展示 */}
                               {conn?.status === 'success' && (
-                                <span className="status-pill success" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none' }}>
+                                <span className="status-pill success" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', padding: '4px 8px' }} title={lang === 'zh' ? '连接正常' : 'Connected'}>
                                   ✔ {conn.delay}ms
                                 </span>
                               )}
-                              {(!conn || conn.status === 'failed') && (
-                                <button 
-                                  className="btn-secondary" 
-                                  style={{ padding: '4px 10px', fontSize: '12px' }}
-                                  onClick={() => handleTestConnection(profile.id)}
-                                >
-                                  🔗 {lang === 'zh' ? '连接检测' : 'Test Connection'}
-                                </button>
+                              {conn?.status === 'failed' && (
+                                <span className="status-pill danger" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', padding: '4px 8px' }} title={lang === 'zh' ? '连接失败' : 'Failed'}>
+                                  ✗ {lang === 'zh' ? '失败' : 'Failed'}
+                                </span>
                               )}
+
+                              <button 
+                                className="btn-secondary" 
+                                style={{ padding: '4px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                onClick={() => handleTestConnection(profile.id)}
+                                disabled={conn?.status === 'testing'}
+                              >
+                                {conn?.status === 'testing' ? (
+                                  <>
+                                    <Icon name="sync" style={{ animation: 'spin 2s linear infinite', fontSize: '14px' }} />
+                                    <span>{lang === 'zh' ? '测试中' : 'Testing'}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Icon name="link" style={{ fontSize: '14px' }} />
+                                    <span>{lang === 'zh' ? '连接检测' : 'Test Connection'}</span>
+                                  </>
+                                )}
+                              </button>
                             </div>
 
                             <button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => setSelectedProfileId(profile.id)}>
