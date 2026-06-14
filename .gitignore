@@ -9,4 +9,6 @@ dist/
 out/
 *.log
 .DS_Store
+/docs/stitch_mcp_service_manager*
+
 

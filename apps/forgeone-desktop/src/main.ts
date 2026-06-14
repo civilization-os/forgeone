@@ -1,11 +1,53 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
+import * as http from 'http';
+import * as https from 'https';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcessWithoutNullStreams | null = null;
 const pendingRequests = new Map<number | string, { resolve: (val: any) => void; reject: (err: any) => void }>();
 let requestIdCounter = 1;
+const allowDevTools = process.env.FORGEONE_ENABLE_DEVTOOLS === '1';
+
+function emitWindowState(window: BrowserWindow | null = mainWindow) {
+  if (!window) return;
+  window.webContents.send('window-state-changed', {
+    isMaximized: window.isMaximized(),
+  });
+}
+
+function isDevToolsShortcut(input: Electron.Input) {
+  const key = input.key.toLowerCase();
+  return (
+    !allowDevTools &&
+    (
+      key === 'f12' ||
+      ((input.control || input.meta) && input.shift && ['i', 'j', 'c'].includes(key))
+    )
+  );
+}
+
+function canReachUrl(url: string, timeoutMs = 1200): Promise<boolean> {
+  return new Promise((resolve) => {
+    const transport = url.startsWith('https:') ? https : http;
+    const request = transport.request(
+      url,
+      { method: 'GET', timeout: timeoutMs },
+      (response) => {
+        response.resume();
+        resolve(true);
+      }
+    );
+
+    request.on('timeout', () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.on('error', () => resolve(false));
+    request.end();
+  });
+}
 
 function startSidecar() {
   const isDev = !app.isPackaged;
@@ -76,35 +118,61 @@ function sendRpcRequest(method: string, params?: any): Promise<any> {
   });
 }
 
-function createWindow() {
+async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    backgroundColor: '#0f172a',
-    titleBarStyle: 'default',
+    minWidth: 1100,
+    minHeight: 720,
+    frame: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#f9f9f7',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false,
+      devTools: allowDevTools,
     },
   });
 
-  const isDev = !app.isPackaged;
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
+  Menu.setApplicationMenu(null);
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (isDevToolsShortcut(input)) {
+      event.preventDefault();
+    }
+  });
+
+  const devServerUrl = 'http://localhost:5173';
+  const builtIndexPath = path.join(__dirname, '../dist/index.html');
+  const shouldUseDevServer = !app.isPackaged && await canReachUrl(devServerUrl);
+
+  if (shouldUseDevServer) {
+    await mainWindow.loadURL(devServerUrl);
+    if (allowDevTools) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    await mainWindow.loadFile(builtIndexPath);
   }
+
+  mainWindow.on('maximize', () => emitWindowState(mainWindow));
+  mainWindow.on('unmaximize', () => emitWindowState(mainWindow));
+  mainWindow.on('enter-full-screen', () => emitWindowState(mainWindow));
+  mainWindow.on('leave-full-screen', () => emitWindowState(mainWindow));
+  mainWindow.once('ready-to-show', () => emitWindowState(mainWindow));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   startSidecar();
-  createWindow();
+  await createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -147,6 +215,10 @@ ipcMain.handle('inspect-trace', async (_, sessionId) => {
   return sendRpcRequest('inspect_trace', { session_id: sessionId });
 });
 
+ipcMain.handle('delete-trace', async (_, sessionId) => {
+  return sendRpcRequest('delete_trace', { session_id: sessionId });
+});
+
 ipcMain.handle('inspect-approval', async (_, sessionId) => {
   return sendRpcRequest('inspect_approval', { session_id: sessionId });
 });
@@ -157,4 +229,30 @@ ipcMain.handle('prune-traces', async () => {
 
 ipcMain.handle('prune-pending', async () => {
   return sendRpcRequest('prune_pending');
+});
+
+ipcMain.handle('window:minimize', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.minimize();
+});
+
+ipcMain.handle('window:toggle-maximize', (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) return;
+
+  if (window.isMaximized()) {
+    window.unmaximize();
+  } else {
+    window.maximize();
+  }
+});
+
+ipcMain.handle('window:close', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
+ipcMain.handle('window:get-state', (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  return {
+    isMaximized: window?.isMaximized() ?? false,
+  };
 });

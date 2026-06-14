@@ -185,14 +185,20 @@ fn build_ollama_payload(request: &ModelRequest) -> serde_json::Value {
         })
         .collect();
 
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "model": strip_model_prefix(&request.model_name),
         "messages": messages,
         "stream": false,
         "options": {
             "temperature": 0.2
         }
-    })
+    });
+
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        payload["options"]["num_predict"] = serde_json::json!(max_output_tokens);
+    }
+
+    payload
 }
 
 /// Client for Ollama model management (list, pull, check).
@@ -315,6 +321,7 @@ mod tests {
             }],
             prompt_token_estimate: 5,
             context_window: 16_000,
+            max_output_tokens: Some(4096),
         };
 
         let payload = build_ollama_payload(&request);
@@ -322,6 +329,7 @@ mod tests {
         assert_eq!(payload["model"], "qwen2.5-coder:7b");
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["stream"], false);
+        assert_eq!(payload["options"]["num_predict"], 4096);
     }
 
     #[test]
@@ -348,6 +356,7 @@ mod tests {
             }],
             prompt_token_estimate: 20,
             context_window: 16_000,
+            max_output_tokens: None,
         };
 
         let caps = adapter.capabilities(&request.model_name);

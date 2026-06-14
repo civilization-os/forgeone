@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+#[cfg(windows)]
+use encoding_rs::GBK;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -610,19 +614,29 @@ impl ToolExecutor for ShellTool {
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
 
-        let output = if cfg!(windows) {
-            std::process::Command::new("cmd")
-                .args(["/C", command])
-                .output()
-        } else {
-            std::process::Command::new("sh")
-                .args(["-c", command])
-                .output()
+        #[cfg(windows)]
+        let output = {
+            let mut shell = std::process::Command::new("cmd");
+            shell.arg("/D").arg("/S").arg("/U").arg("/C");
+            shell.raw_arg(command);
+            shell.output()
         };
+
+        #[cfg(not(windows))]
+        let output = std::process::Command::new("sh")
+            .args(["-c", command])
+            .output();
 
         match output {
             Ok(output) => {
+                #[cfg(windows)]
+                let stdout = decode_windows_console_output(&output.stdout);
+                #[cfg(not(windows))]
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+                #[cfg(windows)]
+                let stderr = decode_windows_console_output(&output.stderr);
+                #[cfg(not(windows))]
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 let exit_code = output.status.code().unwrap_or(-1);
 
@@ -668,6 +682,44 @@ fn error_result(request: &ToolCallRequest, msg: &str) -> ToolCallResult {
     }
 }
 
+#[cfg(windows)]
+fn decode_windows_console_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    if looks_like_utf16le(bytes) {
+        let utf16 = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16_lossy(&utf16);
+    }
+
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return text;
+    }
+
+    let (decoded, _, _) = GBK.decode(bytes);
+    decoded.into_owned()
+}
+
+#[cfg(windows)]
+fn looks_like_utf16le(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+        return false;
+    }
+
+    let zero_high_bytes = bytes
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|&&byte| byte == 0)
+        .count();
+
+    zero_high_bytes * 2 >= bytes.len() / 2
+}
+
 fn truncate_output(text: &str, max_len: usize) -> String {
     if text.len() > max_len {
         let mut end = max_len;
@@ -692,11 +744,35 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: String,
+    pub command: Option<String>,
+    pub args: Option<String>,
+    pub env: Option<Vec<McpEnvVar>>,
+    pub endpoint: Option<String>,
+    pub headers: Option<Vec<McpHeader>>,
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct McpEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct McpHeader {
+    pub key: String,
+    pub value: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use super::{ToolCallRequest, ToolCallStatus, ToolRegistry, next_tool_call_id};
+    use super::{ShellTool, ToolCallRequest, ToolCallStatus, ToolExecutor, ToolRegistry, next_tool_call_id};
 
     #[test]
     fn read_file_tool_returns_preview() {
@@ -716,5 +792,36 @@ mod tests {
 
         assert_eq!(result.status, ToolCallStatus::Success);
         assert!(result.structured_output.contains_key("preview"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_tool_handles_trailing_backslash_arguments() {
+        let mut arguments = HashMap::new();
+        arguments.insert("command".to_string(), "dir C:\\".to_string());
+
+        let result = ShellTool.execute(&ToolCallRequest {
+            call_id: next_tool_call_id(),
+            session_id: "session-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            loop_index: 1,
+            tool_name: "shell".to_string(),
+            arguments,
+            requested_by: "runtime".to_string(),
+        });
+
+        assert_eq!(result.status, ToolCallStatus::Success);
+        assert_eq!(
+            result.structured_output.get("exit_code").map(String::as_str),
+            Some("0")
+        );
+        assert!(result.structured_output.contains_key("stdout"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_windows_console_output_handles_utf16le() {
+        let bytes = "C:\\盘符\r\n".encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect::<Vec<_>>();
+        assert_eq!(super::decode_windows_console_output(&bytes), "C:\\盘符\r\n");
     }
 }

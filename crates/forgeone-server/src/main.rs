@@ -29,14 +29,18 @@ struct JsonRpcError {
 #[derive(Debug, Deserialize)]
 struct RunParams {
     task: String,
+    conversation_id: Option<String>,
+    conversation_history: Option<Vec<forgeone_runtime::ConversationTurnRecord>>,
     model_name: Option<String>,
     max_loops: Option<u32>,
     token_budget: Option<u32>,
+    max_output_tokens: Option<u32>,
     allowed_tools: Option<Vec<String>>,
     read_roots: Option<Vec<String>>,
     approval_read_roots: Option<Vec<String>>,
     api_key: Option<String>,
     base_url: Option<String>,
+    mcp_servers: Option<Vec<forgeone_tools::McpServerConfig>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +137,9 @@ fn handle_request(
             if let Some(b) = params.token_budget {
                 config.token_budget = b;
             }
+            if let Some(max_output_tokens) = params.max_output_tokens {
+                config.max_output_tokens = Some(max_output_tokens);
+            }
             if let Some(tools) = params.allowed_tools {
                 config.policy.allowed_tools = tools;
             }
@@ -142,9 +149,14 @@ fn handle_request(
             if let Some(approval_roots) = params.approval_read_roots {
                 config.policy.approval_read_roots = approval_roots;
             }
+            if let Some(mcp) = params.mcp_servers {
+                config.mcp_servers = mcp;
+            }
 
             let req = RunRequest {
                 task: params.task,
+                conversation_id: params.conversation_id,
+                conversation_history: params.conversation_history.unwrap_or_default(),
                 config,
             };
 
@@ -302,6 +314,12 @@ fn handle_request(
                 .map_err(|e| format!("Invalid params for inspect_trace: {e}"))?;
             let trace = runtime.inspect_session_trace(&params.session_id)?;
             Ok(serde_json::to_value(trace).unwrap())
+        }
+        "delete_trace" => {
+            let params: SessionIdParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))
+                .map_err(|e| format!("Invalid params for delete_trace: {e}"))?;
+            runtime.delete_session_trace(&params.session_id)?;
+            Ok(serde_json::json!({ "deleted": true, "session_id": params.session_id }))
         }
         "inspect_approval" => {
             let params: SessionIdParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))

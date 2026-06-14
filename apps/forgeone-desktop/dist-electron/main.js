@@ -2,17 +2,48 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 const path = require("path");
+const http = require("http");
+const https = require("https");
 const child_process_1 = require("child_process");
 let mainWindow = null;
 let serverProcess = null;
 const pendingRequests = new Map();
 let requestIdCounter = 1;
+const allowDevTools = process.env.FORGEONE_ENABLE_DEVTOOLS === '1';
+function emitWindowState(window = mainWindow) {
+    if (!window)
+        return;
+    window.webContents.send('window-state-changed', {
+        isMaximized: window.isMaximized(),
+    });
+}
+function isDevToolsShortcut(input) {
+    const key = input.key.toLowerCase();
+    return (!allowDevTools &&
+        (key === 'f12' ||
+            ((input.control || input.meta) && input.shift && ['i', 'j', 'c'].includes(key))));
+}
+function canReachUrl(url, timeoutMs = 1200) {
+    return new Promise((resolve) => {
+        const transport = url.startsWith('https:') ? https : http;
+        const request = transport.request(url, { method: 'GET', timeout: timeoutMs }, (response) => {
+            response.resume();
+            resolve(true);
+        });
+        request.on('timeout', () => {
+            request.destroy();
+            resolve(false);
+        });
+        request.on('error', () => resolve(false));
+        request.end();
+    });
+}
 function startSidecar() {
     const isDev = !electron_1.app.isPackaged;
     let binPath = '';
     if (isDev) {
-        // __dirname is dist-electron. target/debug is at ../../target/debug/
-        binPath = path.join(__dirname, '../../target/debug/forgeone-server.exe');
+        // __dirname is dist-electron. target/debug is at ../../../target/debug/
+        binPath = path.join(__dirname, '../../../target/debug/forgeone-server.exe');
     }
     else {
         binPath = path.join(process.resourcesPath, 'forgeone-server.exe');
@@ -72,33 +103,55 @@ function sendRpcRequest(method, params) {
         serverProcess.stdin.write(JSON.stringify(requestPayload) + '\n');
     });
 }
-function createWindow() {
+async function createWindow() {
     mainWindow = new electron_1.BrowserWindow({
         width: 1200,
         height: 800,
-        backgroundColor: '#0f172a',
-        titleBarStyle: 'default',
+        minWidth: 1100,
+        minHeight: 720,
+        frame: false,
+        titleBarStyle: 'hidden',
+        titleBarOverlay: false,
+        autoHideMenuBar: true,
+        backgroundColor: '#f9f9f7',
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            webSecurity: false,
+            devTools: allowDevTools,
         },
     });
-    const isDev = !electron_1.app.isPackaged;
-    if (isDev) {
-        mainWindow.loadURL('http://localhost:5173');
-        mainWindow.webContents.openDevTools();
+    electron_1.Menu.setApplicationMenu(null);
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+        if (isDevToolsShortcut(input)) {
+            event.preventDefault();
+        }
+    });
+    const devServerUrl = 'http://localhost:5173';
+    const builtIndexPath = path.join(__dirname, '../dist/index.html');
+    const shouldUseDevServer = !electron_1.app.isPackaged && await canReachUrl(devServerUrl);
+    if (shouldUseDevServer) {
+        await mainWindow.loadURL(devServerUrl);
+        if (allowDevTools) {
+            mainWindow.webContents.openDevTools({ mode: 'detach' });
+        }
     }
     else {
-        mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+        await mainWindow.loadFile(builtIndexPath);
     }
+    mainWindow.on('maximize', () => emitWindowState(mainWindow));
+    mainWindow.on('unmaximize', () => emitWindowState(mainWindow));
+    mainWindow.on('enter-full-screen', () => emitWindowState(mainWindow));
+    mainWindow.on('leave-full-screen', () => emitWindowState(mainWindow));
+    mainWindow.once('ready-to-show', () => emitWindowState(mainWindow));
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
 }
-electron_1.app.whenReady().then(() => {
+electron_1.app.whenReady().then(async () => {
     startSidecar();
-    createWindow();
+    await createWindow();
     electron_1.app.on('activate', () => {
         if (electron_1.BrowserWindow.getAllWindows().length === 0) {
             createWindow();
@@ -132,6 +185,9 @@ electron_1.ipcMain.handle('list-traces', async () => {
 electron_1.ipcMain.handle('inspect-trace', async (_, sessionId) => {
     return sendRpcRequest('inspect_trace', { session_id: sessionId });
 });
+electron_1.ipcMain.handle('delete-trace', async (_, sessionId) => {
+    return sendRpcRequest('delete_trace', { session_id: sessionId });
+});
 electron_1.ipcMain.handle('inspect-approval', async (_, sessionId) => {
     return sendRpcRequest('inspect_approval', { session_id: sessionId });
 });
@@ -140,4 +196,27 @@ electron_1.ipcMain.handle('prune-traces', async () => {
 });
 electron_1.ipcMain.handle('prune-pending', async () => {
     return sendRpcRequest('prune_pending');
+});
+electron_1.ipcMain.handle('window:minimize', (event) => {
+    electron_1.BrowserWindow.fromWebContents(event.sender)?.minimize();
+});
+electron_1.ipcMain.handle('window:toggle-maximize', (event) => {
+    const window = electron_1.BrowserWindow.fromWebContents(event.sender);
+    if (!window)
+        return;
+    if (window.isMaximized()) {
+        window.unmaximize();
+    }
+    else {
+        window.maximize();
+    }
+});
+electron_1.ipcMain.handle('window:close', (event) => {
+    electron_1.BrowserWindow.fromWebContents(event.sender)?.close();
+});
+electron_1.ipcMain.handle('window:get-state', (event) => {
+    const window = electron_1.BrowserWindow.fromWebContents(event.sender);
+    return {
+        isMaximized: window?.isMaximized() ?? false,
+    };
 });

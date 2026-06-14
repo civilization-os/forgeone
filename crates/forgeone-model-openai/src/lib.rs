@@ -87,7 +87,15 @@ impl ModelAdapter for OpenAiModelAdapter {
 
     fn respond(&self, request: &ModelRequest) -> ModelResponse {
         let response_id = format!("openai-{}", chrono_id());
-        let payload = build_payload(request, &self.model);
+        // Derive the actual model ID: strip the "openai:" routing prefix if present,
+        // so that request.model_name="openai:qwen2.5-coder:14b" → model="qwen2.5-coder:14b".
+        // Fall back to self.model (from OPENAI_MODEL env) when the request name has no prefix.
+        let model_id = if request.model_name.starts_with("openai:") {
+            request.model_name.trim_start_matches("openai:").to_string()
+        } else {
+            self.model.clone()
+        };
+        let payload = build_payload(request, &model_id);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response_body: serde_json::Value = match ureq::post(&url)
@@ -134,11 +142,17 @@ fn build_payload(request: &ModelRequest, model: &str) -> serde_json::Value {
         })
         .collect();
 
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "model": model,
         "messages": messages,
         "temperature": 0.2,
-    })
+    });
+
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        payload["max_tokens"] = serde_json::json!(max_output_tokens);
+    }
+
+    payload
 }
 
 fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse {
@@ -303,6 +317,7 @@ mod tests {
             ],
             prompt_token_estimate: 10,
             context_window: 128_000,
+            max_output_tokens: Some(8192),
         };
 
         let payload = build_payload(&request, "gpt-4o-mini");
@@ -310,6 +325,7 @@ mod tests {
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
         assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(payload["messages"][1]["content"], "Hello");
+        assert_eq!(payload["max_tokens"], 8192);
     }
 
     #[test]
@@ -326,6 +342,7 @@ mod tests {
             }],
             prompt_token_estimate: 20,
             context_window: 128_000,
+            max_output_tokens: None,
         };
 
         let caps = adapter.capabilities(&request.model_name);

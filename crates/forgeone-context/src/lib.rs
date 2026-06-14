@@ -32,6 +32,7 @@ pub enum ContextSourceType {
     SessionHistory,
     ToolObservation,
     SystemPrompt,
+    RuntimeContract,
     PolicyInjection,
     WorkingMemory,
     WorkingSet,
@@ -44,6 +45,7 @@ impl fmt::Display for ContextSourceType {
             Self::SessionHistory => write!(f, "session_history"),
             Self::ToolObservation => write!(f, "tool_observation"),
             Self::SystemPrompt => write!(f, "system_prompt"),
+            Self::RuntimeContract => write!(f, "runtime_contract"),
             Self::PolicyInjection => write!(f, "policy_injection"),
             Self::WorkingMemory => write!(f, "working_memory"),
             Self::WorkingSet => write!(f, "working_set"),
@@ -143,31 +145,21 @@ impl WorkingMemory {
 #[derive(Debug, Clone)]
 pub struct WorkingSet {
     pub active_files: Vec<String>,
+    pub focus_notes: Vec<String>,
     pub active_subtasks: Vec<String>,
+    pub recent_evidence: Vec<String>,
     pub open_questions: Vec<String>,
 }
 
 impl WorkingSet {
     pub fn to_source_content(&self) -> String {
-        let files = if self.active_files.is_empty() {
-            "none".to_string()
-        } else {
-            self.active_files.join("; ")
-        };
-        let subtasks = if self.active_subtasks.is_empty() {
-            "none".to_string()
-        } else {
-            self.active_subtasks.join("; ")
-        };
-        let questions = if self.open_questions.is_empty() {
-            "none".to_string()
-        } else {
-            self.open_questions.join("; ")
-        };
-
         format!(
-            "active_files: {}\nactive_subtasks: {}\nopen_questions: {}",
-            files, subtasks, questions
+            "## Working Set\n{}\n{}\n{}\n{}\n{}",
+            render_section("active_files", &self.active_files),
+            render_section("focus_notes", &self.focus_notes),
+            render_section("active_subtasks", &self.active_subtasks),
+            render_section("recent_evidence", &self.recent_evidence),
+            render_section("open_questions", &self.open_questions),
         )
     }
 }
@@ -224,6 +216,7 @@ pub struct ContextBuildInput {
     pub session_history: Vec<String>,
     pub tool_observations: Vec<ObservationSummary>,
     pub system_prompt: String,
+    pub runtime_contract: Vec<String>,
     pub policy_injections: Vec<String>,
     pub working_memory: WorkingMemory,
     pub working_set: WorkingSet,
@@ -315,6 +308,17 @@ impl ContextEngine for DefaultContextEngine {
             content: input.task_input,
             priority: 100,
         });
+
+        for (index, contract_line) in input.runtime_contract.iter().enumerate() {
+            sources.push(ContextSource {
+                source_id: next_source_id(),
+                source_type: ContextSourceType::RuntimeContract,
+                layer: ContextLayer::GoalAnchor,
+                label: format!("runtime_contract_{index}"),
+                content: contract_line.clone(),
+                priority: 98,
+            });
+        }
 
         sources.push(ContextSource {
             source_id: next_source_id(),
@@ -488,7 +492,7 @@ impl ContextEngine for DefaultContextEngine {
         }
 
         let layers = build_layer_states(&selected_segments);
-        let prompt_messages = assemble_messages(&selected_segments, &layers);
+        let prompt_messages = assemble_messages(&selected_segments, &layers, &compression_events);
         let budget_estimate = prompt_messages
             .iter()
             .map(|message| estimate_tokens(&message.content))
@@ -542,6 +546,7 @@ fn build_layer_states(selected_segments: &[SelectedSegment]) -> Vec<ContextLayer
 fn assemble_messages(
     selected_segments: &[SelectedSegment],
     layers: &[ContextLayerState],
+    compression_events: &[CompressionEvent],
 ) -> Vec<PromptMessage> {
     let mut system_segments = Vec::new();
     let mut user_segments = Vec::new();
@@ -578,20 +583,19 @@ fn assemble_messages(
             .filter(|layer| {
                 layer.layer != ContextLayer::GoalAnchor && !layer.segment_refs.is_empty()
             })
-            .map(|layer| format!("{} tokens={}", layer.layer, layer.token_estimate))
+            .map(|layer| format!("- {} tokens={}", layer.layer, layer.token_estimate))
             .collect::<Vec<_>>()
             .join("\n");
+        let compression_header = render_compression_events(compression_events);
+        let grouped_segments = render_grouped_segments(&user_segments);
         messages.push(PromptMessage {
             message_id: next_message_id(),
             role: "user".to_string(),
             content: format!(
-                "## Context Layers\n{}\n\n{}",
+                "## Prompt-Loaded Context\nThese sections are the only non-system context currently loaded into the prompt.\n\n### Layer Balance\n{}\n\n### Compression Events\n{}\n\n{}",
                 layer_header,
-                user_segments
-                    .iter()
-                    .map(|segment| segment.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
+                compression_header,
+                grouped_segments
             ),
             source_segment_refs: user_segments
                 .iter()
@@ -636,10 +640,67 @@ fn selection_reason(source_type: ContextSourceType) -> &'static str {
         ContextSourceType::SessionHistory => "recent history retained for continuity",
         ContextSourceType::ToolObservation => "recent observation retained as working evidence",
         ContextSourceType::SystemPrompt => "system prompt anchors runtime policy",
+        ContextSourceType::RuntimeContract => {
+            "runtime contract declares visible capabilities and limits"
+        }
         ContextSourceType::PolicyInjection => "policy injection must be explicit",
         ContextSourceType::WorkingMemory => "working memory keeps current progress stable",
         ContextSourceType::WorkingSet => "working set keeps active files and subtasks in focus",
     }
+}
+
+fn render_section(label: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{label}: none");
+    }
+
+    format!(
+        "{label}:\n{}",
+        items
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn render_grouped_segments(user_segments: &[&SelectedSegment]) -> String {
+    let ordered_layers = [
+        ContextLayer::WorkingSet,
+        ContextLayer::EvidenceBuffer,
+        ContextLayer::ArchiveSummary,
+    ];
+
+    ordered_layers
+        .into_iter()
+        .filter_map(|layer| {
+            let content = user_segments
+                .iter()
+                .filter(|segment| segment.layer == layer)
+                .map(|segment| segment.content.as_str())
+                .collect::<Vec<_>>();
+            if content.is_empty() {
+                None
+            } else {
+                Some(format!("### {}\n{}", layer, content.join("\n\n")))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_compression_events(compression_events: &[CompressionEvent]) -> String {
+    if compression_events.is_empty() {
+        return "none".to_string();
+    }
+
+    compression_events
+        .iter()
+        .rev()
+        .take(3)
+        .map(|event| format!("- {} via {} ({})", event.layer, event.strategy, event.reason))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn estimate_tokens(content: &str) -> u32 {
@@ -697,6 +758,7 @@ mod tests {
                 content: None,
             }],
             system_prompt: "you are a coding agent".to_string(),
+            runtime_contract: vec!["tool_call_protocol: json".to_string()],
             policy_injections: vec!["do not exceed token budget".to_string()],
             working_memory: WorkingMemory {
                 current_goal: "stabilize runtime".to_string(),
@@ -705,7 +767,9 @@ mod tests {
             },
             working_set: WorkingSet {
                 active_files: vec!["crates/forgeone-runtime/src/lib.rs".to_string()],
+                focus_notes: vec!["runtime file is under active review".to_string()],
                 active_subtasks: vec!["build context snapshot".to_string()],
+                recent_evidence: vec!["read_file => runtime source".to_string()],
                 open_questions: vec!["which tool to call next".to_string()],
             },
             token_budget: 128,
@@ -742,6 +806,7 @@ mod tests {
             session_history: vec![],
             tool_observations: vec![],
             system_prompt: "you are a coding agent".to_string(),
+            runtime_contract: vec!["visible_prompt_layers: working_set".to_string()],
             policy_injections: vec![],
             working_memory: WorkingMemory {
                 current_goal: "list files".to_string(),
@@ -750,7 +815,9 @@ mod tests {
             },
             working_set: WorkingSet {
                 active_files: vec![],
+                focus_notes: vec![],
                 active_subtasks: vec!["inspect workspace".to_string()],
+                recent_evidence: vec![],
                 open_questions: vec![],
             },
             token_budget: 1024,
@@ -775,6 +842,54 @@ mod tests {
         assert!(system_msg.content.contains("read_file"));
         assert!(system_msg.content.contains("search_content"));
         assert!(system_msg.content.contains("Available Tools"));
+    }
+
+    #[test]
+    fn context_exposes_runtime_contract_and_prompt_loaded_context() {
+        let engine = DefaultContextEngine;
+        let snapshot = engine.build(ContextBuildInput {
+            session_id: "session-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            loop_index: 2,
+            task_input: "inspect prompt".to_string(),
+            session_history: vec!["history-1".to_string(), "history-2".to_string()],
+            tool_observations: vec![],
+            system_prompt: "you are a coding agent".to_string(),
+            runtime_contract: vec![
+                "## Runtime Contract".to_string(),
+                "visible_prompt_layers: working_set, archive_summary".to_string(),
+            ],
+            policy_injections: vec![],
+            working_memory: WorkingMemory {
+                current_goal: "inspect prompt".to_string(),
+                completed_items: vec![],
+                pending_items: vec!["render context".to_string()],
+            },
+            working_set: WorkingSet {
+                active_files: vec!["src/lib.rs".to_string()],
+                focus_notes: vec!["src/lib.rs is active".to_string()],
+                active_subtasks: vec!["render context".to_string()],
+                recent_evidence: vec!["pending_tool_call: none".to_string()],
+                open_questions: vec!["what is loaded".to_string()],
+            },
+            token_budget: 512,
+            tool_descriptors: vec![],
+        });
+
+        let system_msg = snapshot
+            .prompt_messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("should have a system message");
+        let user_msg = snapshot
+            .prompt_messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("should have a user message");
+
+        assert!(system_msg.content.contains("Runtime Contract"));
+        assert!(user_msg.content.contains("Prompt-Loaded Context"));
+        assert!(user_msg.content.contains("Compression Events"));
     }
 
     #[test]
@@ -809,6 +924,7 @@ mod tests {
                 },
             ],
             system_prompt: "you are a coding agent".to_string(),
+            runtime_contract: vec!["context_management: compression enabled".to_string()],
             policy_injections: vec![],
             working_memory: WorkingMemory {
                 current_goal: "continue task".to_string(),
@@ -817,7 +933,9 @@ mod tests {
             },
             working_set: WorkingSet {
                 active_files: vec!["src/lib.rs".to_string()],
+                focus_notes: vec!["src/lib.rs is part of the active patch".to_string()],
                 active_subtasks: vec!["continue task".to_string()],
+                recent_evidence: vec!["search_content => obs-2".to_string()],
                 open_questions: vec!["what changed last round".to_string()],
             },
             token_budget: 512,

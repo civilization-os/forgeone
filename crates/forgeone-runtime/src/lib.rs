@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+
+pub mod mcp;
 
 use forgeone_context::{
     ContextBuildInput, ContextEngine, ContextLayer, ContextSnapshot, DefaultContextEngine,
@@ -14,7 +17,8 @@ use forgeone_model::{
 use forgeone_policy::{ApprovalRequest, PolicyConfig, PolicyDecision, PolicyEngine};
 pub use forgeone_session::{
     ApprovalObservationRecord, ApprovalPendingRecord, ApprovalPolicyRecord, ApprovalSessionRecord,
-    ApprovalToolCallRecord, FileSessionStore, SessionStore, SessionTraceRecord,
+    ApprovalToolCallRecord, ConversationTurnRecord, FileSessionStore, SessionStore,
+    SessionTraceRecord,
 };
 use forgeone_tools::{
     Observation, ToolCallRequest, ToolCallResult, ToolDescriptor, ToolRegistry, next_tool_call_id,
@@ -24,32 +28,41 @@ use forgeone_trace::{InMemoryTraceStore, TraceEvent, TraceEventKind};
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-const SYSTEM_PROMPT: &str = "You are ForgeOne, a terminal-first coding agent runtime.
+const SYSTEM_PROMPT: &str = "You are ForgeOne, an open coding agent runtime. You can help with coding tasks, answer questions, chat, and assist with software development.
+
+## Behavior Guidelines
+
+- For greetings, small talk, or simple questions: respond naturally and directly in plain text. Do NOT use any tools.
+- For coding tasks, file operations, or when you need information from the repository: use the tool calling protocol below.
+- Always be helpful, friendly, and concise.
+- Always respond in the same language as the user's message.
 
 ## Tool Calling Protocol
 
-When you need to gather information, output a JSON object on its own line:
+When you need to read files, search code, or run commands, output a JSON object on its own line:
 
 {\"tool\": \"<tool_name>\", \"arguments\": {\"<arg_name>\": \"<arg_value>\"}}
 
 Example:
 {\"tool\": \"read_file\", \"arguments\": {\"path\": \"Cargo.toml\"}}
 
-## Rules
+## Tool Usage Rules
 
-1. Call a tool only when you lack information to answer the task.
-2. After receiving a tool result, ANALYZE the result immediately. If it contains the answer, produce your final answer in plain text.
-3. NEVER call the same tool twice for the same purpose. The result is already in your context.
-4. If a tool call is denied, produce the best answer you can with the information you already have.
-5. When the task is complete, output your final answer as plain text — do NOT include any JSON.
-6. Always respond in the same language as the user's question.";
+1. Only call a tool when you genuinely lack information needed to complete the task.
+2. For conversational messages (greetings, questions you can answer from knowledge), respond directly — no tools needed.
+3. After receiving a tool result, analyze it immediately and produce your answer in plain text.
+4. NEVER call the same tool twice with the same arguments.
+5. If a tool call is denied, answer as best you can with what you already know.
+6. When done, output your final answer as plain text — do NOT include any JSON.";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub max_loops: u32,
     pub token_budget: u32,
+    pub max_output_tokens: Option<u32>,
     pub model_name: String,
     pub policy: PolicyConfig,
+    pub mcp_servers: Vec<forgeone_tools::McpServerConfig>,
 }
 
 impl Default for RuntimeConfig {
@@ -57,8 +70,10 @@ impl Default for RuntimeConfig {
         Self {
             max_loops: 8,
             token_budget: 32_000,
+            max_output_tokens: None,
             model_name: "mock-model".to_string(),
             policy: PolicyConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -66,12 +81,17 @@ impl Default for RuntimeConfig {
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub task: String,
+    pub conversation_id: Option<String>,
+    pub conversation_history: Vec<ConversationTurnRecord>,
     pub config: RuntimeConfig,
 }
 
 #[derive(Debug, Clone)]
 pub struct Session {
     pub session_id: String,
+    pub conversation_id: String,
+    pub turn_index: u32,
+    pub conversation_history: Vec<ConversationTurnRecord>,
     pub task: Task,
     pub config: RuntimeConfig,
 }
@@ -280,7 +300,8 @@ impl<S: SessionStore> RuntimeCore<S> {
             budget_usage: BudgetUsage::default(),
             stop_reason: None,
         };
-        let final_response = self.run_agent_loop(&session, &mut state, &mut trace, 1);
+        let active_mcp_clients = self.init_mcp_clients(&session.config);
+        let final_response = self.run_agent_loop(&session, &mut state, &mut trace, 1, &active_mcp_clients);
 
         if state.stop_reason.is_none() && state.pending_approval.is_none() {
             state.stop_reason = Some(StopReason::MaxLoopsReached);
@@ -327,11 +348,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             final_response,
             trace: trace_events,
         };
-        let trace_record = self.build_session_trace_record(
-            &result,
-            &session.task.input,
-            session.config.token_budget,
-        );
+        let trace_record = self.build_session_trace_record(&result, &session);
         self.save_session_trace(&trace_record)
             .expect("failed to save session trace");
         result
@@ -413,20 +430,10 @@ impl<S: SessionStore> RuntimeCore<S> {
         });
         state.pending_approval = None;
 
-        self.transition(
-            &mut state,
-            RuntimeStatus::Running,
-            Some(LoopStep::ToolExecution),
-        );
-        self.emit_policy_checked(&mut trace, &state);
-        self.execute_tool_call(&mut state, None);
-        self.emit_tool_completed(&mut trace, &state);
-
-        self.complete_state_update(&mut trace, &mut state);
-
         let config = RuntimeConfig {
             max_loops: record.max_loops,
             token_budget: record.token_budget,
+            max_output_tokens: record.max_output_tokens,
             model_name: record.model_name.clone(),
             policy: PolicyConfig {
                 allowed_tools: record.allowed_tools.clone(),
@@ -434,10 +441,14 @@ impl<S: SessionStore> RuntimeCore<S> {
                 max_tool_calls: record.max_tool_calls,
                 approval_read_roots: record.approval_read_roots.clone(),
             },
+            mcp_servers: record.mcp_servers.clone(),
         };
 
         let session = Session {
             session_id: record.session_id.clone(),
+            conversation_id: record.conversation_id.clone(),
+            turn_index: record.turn_index,
+            conversation_history: record.conversation_history.clone(),
             task: Task {
                 task_id: record.task_id.clone(),
                 input: record.task_input.clone(),
@@ -445,8 +456,21 @@ impl<S: SessionStore> RuntimeCore<S> {
             config,
         };
 
+        let active_mcp_clients = self.init_mcp_clients(&session.config);
+
+        self.transition(
+            &mut state,
+            RuntimeStatus::Running,
+            Some(LoopStep::ToolExecution),
+        );
+        self.emit_policy_checked(&mut trace, &state);
+        self.execute_tool_call(&mut state, None, &active_mcp_clients);
+        self.emit_tool_completed(&mut trace, &state);
+
+        self.complete_state_update(&mut trace, &mut state);
+
         let final_response =
-            self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1);
+            self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1, &active_mcp_clients);
 
         if state.stop_reason.is_none() {
             state.stop_reason = Some(StopReason::MaxLoopsReached);
@@ -487,11 +511,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             final_response,
             trace: trace.into_events(),
         };
-        let trace_record = self.build_session_trace_record(
-            &result,
-            &session.task.input,
-            session.config.token_budget,
-        );
+        let trace_record = self.build_session_trace_record(&result, &session);
         self.save_session_trace(&trace_record)
             .map_err(|error| format!("failed to save session trace: {error}"))?;
 
@@ -529,6 +549,14 @@ impl<S: SessionStore> RuntimeCore<S> {
         self.session_store.list_pending_approvals()
     }
 
+    pub fn delete_session_trace(&self, session_id: &str) -> Result<(), String> {
+        self.session_store.delete_session_trace(session_id)?;
+        if self.session_store.pending_approval_exists(session_id) {
+            self.session_store.delete_approval_session(session_id)?;
+        }
+        Ok(())
+    }
+
     pub fn prune_session_traces(&self) -> Result<usize, String> {
         self.session_store.prune_session_traces()
     }
@@ -543,6 +571,7 @@ impl<S: SessionStore> RuntimeCore<S> {
         state: &mut RuntimeState,
         trace: &mut InMemoryTraceStore,
         start_loop_index: u32,
+        active_mcp_clients: &[Arc<mcp::ActiveMcpClient>],
     ) -> Option<String> {
         let mut final_response = None;
 
@@ -550,7 +579,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             state.loop_index = loop_index;
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ContextBuild));
             self.emit_loop_started(trace, state);
-            state.active_context_snapshot = Some(self.build_context_snapshot(state, session));
+            state.active_context_snapshot = Some(self.build_context_snapshot(state, session, active_mcp_clients));
             self.emit_context_built(trace, state);
 
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ModelRequest));
@@ -561,10 +590,11 @@ impl<S: SessionStore> RuntimeCore<S> {
 
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolDecision));
             state.active_tool_call = self.decide_tool_call(state);
+            let mut duplicate_tool_call_blocked = false;
             if let Some(request) = state.active_tool_call.clone() {
                 if self.is_repeated_tool_call(state, &request) {
                     let detail = format!(
-                        "tool={} arguments={} repeats the most recent successful tool call",
+                        "tool={} arguments={} repeats the most recent tool call",
                         request.tool_name,
                         summarize_tool_arguments(&request.arguments)
                     );
@@ -596,29 +626,30 @@ impl<S: SessionStore> RuntimeCore<S> {
                         completed_at_ms: now_ms(),
                     });
                     state.active_tool_call = None;
-                    final_response = Some(format!(
-                        "[runtime] stopped repeated tool call {} with identical arguments; reuse the prior observation or choose a different action.",
-                        request.tool_name
-                    ));
-                    state.stop_reason = Some(StopReason::FinalResponse);
+                    duplicate_tool_call_blocked = true;
                 }
             }
             if state.active_tool_call.is_none() {
-                if final_response.is_none() {
+                if !duplicate_tool_call_blocked && final_response.is_none() {
                     final_response = self.extract_final_response(state);
                 }
-                state.stop_reason = Some(StopReason::FinalResponse);
+                if !duplicate_tool_call_blocked {
+                    state.stop_reason = Some(StopReason::FinalResponse);
+                }
             }
             self.emit_tool_decision(trace, state);
 
             if state.active_tool_call.is_none() {
                 self.emit_policy_checked(trace, state);
                 self.complete_state_update(trace, state);
+                if duplicate_tool_call_blocked {
+                    continue;
+                }
                 break;
             }
 
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolExecution));
-            let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy));
+            let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy), active_mcp_clients);
             self.emit_policy_checked(trace, state);
             self.emit_tool_completed(trace, state);
 
@@ -807,9 +838,14 @@ impl<S: SessionStore> RuntimeCore<S> {
         ));
     }
 
-    fn build_context_snapshot(&self, state: &RuntimeState, session: &Session) -> ContextSnapshot {
+    fn build_context_snapshot(
+        &self,
+        state: &RuntimeState,
+        session: &Session,
+        active_mcp_clients: &[Arc<mcp::ActiveMcpClient>],
+    ) -> ContextSnapshot {
         let engine = DefaultContextEngine;
-        let registry = ToolRegistry::with_builtin_tools();
+        let registry = self.build_tool_registry(active_mcp_clients);
         let tool_info: Vec<ToolInfo> = registry
             .descriptors()
             .into_iter()
@@ -830,9 +866,10 @@ impl<S: SessionStore> RuntimeCore<S> {
             agent_id: state.agent_id.clone(),
             loop_index: state.loop_index,
             task_input: session.task.input.clone(),
-            session_history: self.build_session_history(state),
+            session_history: self.build_session_history(state, session),
             tool_observations: self.to_observation_summaries(&state.observations),
             system_prompt: SYSTEM_PROMPT.to_string(),
+            runtime_contract: self.build_runtime_contract(state),
             policy_injections: self.build_policy_injections(state),
             working_memory: self.build_working_memory(state, session),
             working_set: working_set.clone(),
@@ -841,7 +878,7 @@ impl<S: SessionStore> RuntimeCore<S> {
         })
     }
 
-    fn build_session_history(&self, state: &RuntimeState) -> Vec<String> {
+    fn build_session_history(&self, state: &RuntimeState, session: &Session) -> Vec<String> {
         let mut history = Vec::new();
         history.push(format!(
             "loop={} phase={} status={}",
@@ -879,6 +916,10 @@ impl<S: SessionStore> RuntimeCore<S> {
             }
         }
 
+        history.extend(session.conversation_history.iter().map(|turn| {
+            format!("conversation_turn role={} content={}", turn.role, turn.content)
+        }));
+
         history
     }
 
@@ -910,6 +951,38 @@ impl<S: SessionStore> RuntimeCore<S> {
         }
 
         injections
+    }
+
+    fn build_runtime_contract(&self, state: &RuntimeState) -> Vec<String> {
+        let mut contract = vec![
+            "## Runtime Contract".to_string(),
+            "runtime_kind: open agent runtime with controllable tool execution".to_string(),
+            "tool_call_protocol: emit exactly one JSON tool call when action is required; otherwise answer in plain text".to_string(),
+            "visible_prompt_layers: goal_anchor, working_set, evidence_buffer, archive_summary".to_string(),
+            "persistent_task_memory: false across restarts unless the harness explicitly reloads prior state".to_string(),
+            "context_management: older history and stale observations may be compressed before active context expands".to_string(),
+        ];
+
+        if let Some(snapshot) = &state.active_context_snapshot {
+            let archive_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::ArchiveSummary)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            let working_tokens = snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.layer == ContextLayer::WorkingSet)
+                .map(|layer| layer.token_estimate)
+                .unwrap_or(0);
+            contract.push(format!(
+                "previous_prompt_balance: working_set_tokens={} archive_summary_tokens={}",
+                working_tokens, archive_tokens
+            ));
+        }
+
+        contract
     }
 
     fn build_working_memory(&self, state: &RuntimeState, session: &Session) -> WorkingMemory {
@@ -965,14 +1038,25 @@ impl<S: SessionStore> RuntimeCore<S> {
 
     fn build_working_set(&self, state: &RuntimeState) -> WorkingSet {
         let mut active_files = Vec::new();
+        let mut focus_notes = Vec::new();
         let mut active_subtasks = Vec::new();
+        let mut recent_evidence = Vec::new();
         let mut open_questions = Vec::new();
 
         if let Some(call) = &state.active_tool_call {
             active_subtasks.push(format!("resolve tool call {}", call.tool_name));
             if let Some(path) = call.arguments.get("path") {
                 active_files.push(path.clone());
+                focus_notes.push(format!(
+                    "{} is active because the pending {} call targets it",
+                    path, call.tool_name
+                ));
             }
+            recent_evidence.push(format!(
+                "pending_tool_call: {} {}",
+                call.tool_name,
+                summarize_tool_arguments(&call.arguments)
+            ));
         }
 
         if let Some(result) = &state.last_tool_result
@@ -980,9 +1064,17 @@ impl<S: SessionStore> RuntimeCore<S> {
             && !active_files.iter().any(|file| file == path)
         {
             active_files.push(path.clone());
+            focus_notes.push(format!(
+                "{} is active because the latest tool result produced this path",
+                path
+            ));
         }
 
         for observation in state.observations.iter().rev().take(2) {
+            recent_evidence.push(format!(
+                "{} => {}",
+                observation.tool_name, observation.summary
+            ));
             if observation.tool_name == "read_file" || observation.tool_name == "write_file" {
                 if let Some(content) = &observation.content {
                     if content.contains('/') {
@@ -990,7 +1082,11 @@ impl<S: SessionStore> RuntimeCore<S> {
                         if !candidate.is_empty()
                             && !active_files.iter().any(|file| file == &candidate)
                         {
-                            active_files.push(candidate);
+                            active_files.push(candidate.clone());
+                            focus_notes.push(format!(
+                                "{} is active because a recent {} observation referenced it",
+                                candidate, observation.tool_name
+                            ));
                         }
                     }
                 }
@@ -1015,12 +1111,16 @@ impl<S: SessionStore> RuntimeCore<S> {
         }
 
         dedupe_keep_order(&mut active_files);
+        dedupe_keep_order(&mut focus_notes);
         dedupe_keep_order(&mut active_subtasks);
+        dedupe_keep_order(&mut recent_evidence);
         dedupe_keep_order(&mut open_questions);
 
         WorkingSet {
             active_files,
+            focus_notes,
             active_subtasks,
+            recent_evidence,
             open_questions,
         }
     }
@@ -1120,6 +1220,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             messages: snapshot.prompt_messages.clone(),
             prompt_token_estimate: snapshot.budget_estimate,
             context_window: model_capabilities.context_window,
+            max_output_tokens: config.max_output_tokens,
         }
     }
 
@@ -1283,6 +1384,7 @@ impl<S: SessionStore> RuntimeCore<S> {
         &self,
         state: &mut RuntimeState,
         policy: Option<&PolicyConfig>,
+        active_mcp_clients: &[Arc<mcp::ActiveMcpClient>],
     ) -> ToolExecutionOutcome {
         let Some(request) = state.active_tool_call.clone() else {
             return ToolExecutionOutcome::NoCall;
@@ -1329,7 +1431,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             }
         }
 
-        let registry = ToolRegistry::with_builtin_tools();
+        let registry = self.build_tool_registry(active_mcp_clients);
         let result = registry.execute(&request);
         let observation = build_observation(&request, &result);
         state.observations.push(observation);
@@ -1388,12 +1490,16 @@ impl<S: SessionStore> RuntimeCore<S> {
 
         ApprovalSessionRecord {
             session_id: state.session_id.clone(),
+            conversation_id: session.conversation_id.clone(),
+            turn_index: session.turn_index,
             task_id: state.task_id.clone(),
             task_input: session.task.input.clone(),
+            conversation_history: session.conversation_history.clone(),
             agent_id: state.agent_id.clone(),
             loop_index: state.loop_index,
             max_loops: session.config.max_loops,
             token_budget: session.config.token_budget,
+            max_output_tokens: session.config.max_output_tokens,
             model_name: session.config.model_name.clone(),
             allowed_tools: session.config.policy.allowed_tools.clone(),
             read_roots: session.config.policy.read_roots.clone(),
@@ -1431,6 +1537,7 @@ impl<S: SessionStore> RuntimeCore<S> {
                 reason: pending_approval.reason.clone(),
                 argument_summary: pending_approval.argument_summary.clone(),
             },
+            mcp_servers: session.config.mcp_servers.clone(),
         }
     }
 
@@ -1446,16 +1553,66 @@ impl<S: SessionStore> RuntimeCore<S> {
         self.session_store.delete_approval_session(session_id)
     }
 
-    fn build_session_trace_record(
-        &self,
-        result: &RunResult,
-        task_input: &str,
-        token_budget: u32,
-    ) -> SessionTraceRecord {
+    fn build_tool_registry(&self, active_mcp_clients: &[Arc<mcp::ActiveMcpClient>]) -> ToolRegistry {
+        let mut registry = ToolRegistry::with_builtin_tools();
+        for client in active_mcp_clients {
+            let provider = forgeone_tools::ToolProviderDescriptor {
+                provider_id: client.name.clone(),
+                display_name: client.name.clone(),
+                kind: forgeone_tools::ToolKind::Mcp,
+                version: None,
+                description: format!("MCP Server: {}", client.name),
+                source: forgeone_tools::ToolProviderSource::RuntimeRegistration,
+            };
+            let _ = registry.register_provider(provider);
+            for tool_desc in &client.tools {
+                let original_name = tool_desc.tool_name.strip_prefix(&format!("{}__", client.name))
+                    .unwrap_or(&tool_desc.tool_name)
+                    .to_string();
+                let executor = mcp::McpExecutor {
+                    client: client.clone(),
+                    original_name,
+                    descriptor: tool_desc.clone(),
+                };
+                let _ = registry.register_with_provider(&client.name, executor);
+            }
+        }
+        registry
+    }
+
+    fn init_mcp_clients(&self, config: &RuntimeConfig) -> Vec<Arc<mcp::ActiveMcpClient>> {
+        let mut active_mcp_clients = Vec::new();
+        let workspace_root = config.policy.read_roots.first().map(|r| std::path::Path::new(r)).unwrap_or_else(|| std::path::Path::new("."));
+        let discovered_configs = mcp::discover_workspace_mcp_configs(workspace_root);
+        
+        let mut all_configs = config.mcp_servers.clone();
+        for disc in discovered_configs {
+            if !all_configs.iter().any(|c| c.name == disc.name) {
+                all_configs.push(disc);
+            }
+        }
+        
+        for mcp_conf in all_configs {
+            if mcp_conf.transport == "stdio" {
+                match mcp::ActiveMcpClient::new(&mcp_conf) {
+                    Ok(client) => active_mcp_clients.push(Arc::new(client)),
+                    Err(e) => {
+                        eprintln!("Failed to start MCP server {}: {}", mcp_conf.name, e);
+                    }
+                }
+            }
+        }
+        
+        active_mcp_clients
+    }
+
+    fn build_session_trace_record(&self, result: &RunResult, session: &Session) -> SessionTraceRecord {
         SessionTraceRecord {
             session_id: result.state.session_id.clone(),
+            conversation_id: session.conversation_id.clone(),
+            turn_index: session.turn_index,
             task_id: result.state.task_id.clone(),
-            task_input: task_input.to_string(),
+            task_input: session.task.input.clone(),
             agent_id: result.state.agent_id.clone(),
             status: result.state.status.to_string(),
             current_phase: result.state.current_phase.to_string(),
@@ -1475,9 +1632,15 @@ impl<S: SessionStore> RuntimeCore<S> {
                     argument_summary: approval.argument_summary.clone(),
                 }
             }),
-            token_budget,
+            token_budget: session.config.token_budget,
             tokens_estimate: result.state.budget_usage.tokens_estimate,
             tool_call_count: result.state.budget_usage.tool_call_count,
+            updated_at_ms: result
+                .trace
+                .iter()
+                .map(|event| event.timestamp_ms as u64)
+                .max()
+                .unwrap_or_else(|| now_ms() as u64),
             trace: result.trace.clone(),
         }
     }
@@ -1498,9 +1661,21 @@ enum ToolExecutionOutcome {
 impl Session {
     fn new(request: RunRequest) -> Self {
         let session_id = next_session_id();
+        let conversation_id = request
+            .conversation_id
+            .unwrap_or_else(next_conversation_id);
+        let turn_index = request
+            .conversation_history
+            .iter()
+            .filter(|turn| turn.role.eq_ignore_ascii_case("user"))
+            .count() as u32
+            + 1;
         let task = Task::new(request.task);
         Self {
             session_id,
+            conversation_id,
+            turn_index,
+            conversation_history: request.conversation_history,
             task,
             config: request.config,
         }
@@ -1526,6 +1701,16 @@ fn next_session_id() -> String {
     format!("session-{timestamp}-{pid}-{counter}")
 }
 
+fn next_conversation_id() -> String {
+    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis();
+    let pid = std::process::id();
+    format!("conversation-{timestamp}-{pid}-{counter}")
+}
+
 fn next_agent_id() -> String {
     let counter = AGENT_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("agent-{counter}")
@@ -1540,7 +1725,7 @@ fn next_task_id() -> String {
 /// Different tools return different keys (preview, files, matches, stdout).
 fn extract_observation_content(output: &HashMap<String, String>) -> Option<String> {
     // Priority order: the most useful keys for the model
-    for key in &["files", "matches", "preview", "stdout"] {
+    for key in &["files", "matches", "preview", "stdout", "stderr", "detail"] {
         if let Some(value) = output.get(*key) {
             let truncated: String = value.lines().take(100).collect::<Vec<_>>().join("\n");
             // Skip if it's just a count line
@@ -1565,6 +1750,7 @@ fn build_observation(request: &ToolCallRequest, result: &ToolCallResult) -> Obse
             .or_else(|| result.structured_output.get("files"))
             .or_else(|| result.structured_output.get("matches"))
             .or_else(|| result.structured_output.get("stdout"))
+            .or_else(|| result.structured_output.get("stderr"))
             .map(|preview| preview.lines().next().unwrap_or(""))
             .unwrap_or("");
         format!(
@@ -1636,6 +1822,8 @@ mod tests {
         let core = RuntimeCore::default();
         let result = core.run(RunRequest {
             task: "inspect repo".to_string(),
+            conversation_id: None,
+            conversation_history: vec![],
             config: RuntimeConfig::default(),
         });
 
@@ -1679,6 +1867,8 @@ mod tests {
 
         let result = core.run(RunRequest {
             task: "inspect runtime".to_string(),
+            conversation_id: None,
+            conversation_history: vec![],
             config,
         });
 
@@ -1764,6 +1954,8 @@ mod tests {
                 .iter()
                 .any(|task| task.contains("resolve tool call read_file"))
         );
+        assert!(!working_set.focus_notes.is_empty());
+        assert!(!working_set.recent_evidence.is_empty());
         assert!(!working_set.open_questions.is_empty());
     }
 
@@ -1776,10 +1968,12 @@ mod tests {
         );
         let working_set = WorkingSet {
             active_files: vec!["crates/forgeone-runtime/src/lib.rs".to_string()],
+            focus_notes: vec!["runtime file is under active review".to_string()],
             active_subtasks: vec![
                 "search runtime state transitions".to_string(),
                 "run targeted command".to_string(),
             ],
+            recent_evidence: vec!["search_content => RuntimeState matches".to_string()],
             open_questions: vec!["work around denied action".to_string()],
         };
         let descriptors = core.select_tool_descriptors(
@@ -1829,12 +2023,16 @@ mod tests {
         );
         let session = super::Session {
             session_id: "session-test".to_string(),
+            conversation_id: "conversation-test".to_string(),
+            turn_index: 1,
+            conversation_history: vec![],
             task: super::Task {
                 task_id: "task-test".to_string(),
                 input: "inspect runtime".to_string(),
             },
             config: RuntimeConfig {
                 model_name: "openai:gpt-4o".to_string(),
+                max_output_tokens: Some(8192),
                 ..RuntimeConfig::default()
             },
         };
@@ -1844,6 +2042,7 @@ mod tests {
 
         assert_eq!(request.context_window, 128_000);
         assert!(request.prompt_token_estimate > 0);
+        assert_eq!(request.max_output_tokens, Some(8192));
     }
 
     fn build_test_state<const N: usize>(
@@ -2003,6 +2202,12 @@ mod tests {
                 .find(|record| record.session_id == session_id)
                 .cloned()
                 .ok_or_else(|| format!("missing session trace {session_id}"))
+        }
+
+        fn delete_session_trace(&self, session_id: &str) -> Result<(), String> {
+            let mut traces = self.traces.lock().expect("traces should lock");
+            traces.retain(|record| record.session_id != session_id);
+            Ok(())
         }
 
         fn list_session_traces(&self) -> Result<Vec<SessionTraceRecord>, String> {

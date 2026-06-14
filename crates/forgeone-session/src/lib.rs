@@ -6,14 +6,28 @@ use forgeone_trace::TraceEvent;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurnRecord {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalSessionRecord {
     pub session_id: String,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub turn_index: u32,
     pub task_id: String,
     pub task_input: String,
+    #[serde(default)]
+    pub conversation_history: Vec<ConversationTurnRecord>,
     pub agent_id: String,
     pub loop_index: u32,
     pub max_loops: u32,
     pub token_budget: u32,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
     pub model_name: String,
     pub allowed_tools: Vec<String>,
     pub read_roots: Vec<String>,
@@ -26,11 +40,17 @@ pub struct ApprovalSessionRecord {
     pub policy_decisions: Vec<ApprovalPolicyRecord>,
     pub active_tool_call: ApprovalToolCallRecord,
     pub pending_approval: ApprovalPendingRecord,
+    #[serde(default)]
+    pub mcp_servers: Vec<forgeone_tools::McpServerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTraceRecord {
     pub session_id: String,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub turn_index: u32,
     pub task_id: String,
     pub task_input: String,
     pub agent_id: String,
@@ -44,6 +64,8 @@ pub struct SessionTraceRecord {
     pub token_budget: u32,
     pub tokens_estimate: u32,
     pub tool_call_count: u32,
+    #[serde(default)]
+    pub updated_at_ms: u64,
     pub trace: Vec<TraceEvent>,
 }
 
@@ -87,6 +109,7 @@ pub trait SessionStore {
     fn save_session_trace(&self, record: &SessionTraceRecord) -> Result<(), String>;
     fn load_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String>;
     fn inspect_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String>;
+    fn delete_session_trace(&self, session_id: &str) -> Result<(), String>;
     fn list_session_traces(&self) -> Result<Vec<SessionTraceRecord>, String>;
     fn prune_session_traces(&self) -> Result<usize, String>;
 }
@@ -159,6 +182,14 @@ impl SessionStore for FileSessionStore {
 
     fn inspect_session_trace(&self, session_id: &str) -> Result<SessionTraceRecord, String> {
         self.load_session_trace(session_id)
+    }
+
+    fn delete_session_trace(&self, session_id: &str) -> Result<(), String> {
+        let path = session_trace_path(session_id);
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn list_session_traces(&self) -> Result<Vec<SessionTraceRecord>, String> {
@@ -243,8 +274,8 @@ mod tests {
 
     use super::{
         ApprovalObservationRecord, ApprovalPendingRecord, ApprovalPolicyRecord,
-        ApprovalSessionRecord, ApprovalToolCallRecord, FileSessionStore, SessionStore,
-        SessionTraceRecord,
+        ApprovalSessionRecord, ApprovalToolCallRecord, ConversationTurnRecord,
+        FileSessionStore, SessionStore, SessionTraceRecord,
     };
 
     static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -301,6 +332,15 @@ mod tests {
             .expect("approval session should delete");
         assert!(!store.pending_approval_exists("session-100"));
 
+        store
+            .delete_session_trace("session-300")
+            .expect("session trace should delete");
+        let traces = store
+            .list_session_traces()
+            .expect("session traces should list");
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].session_id, "session-100");
+
         let deleted_approvals = store
             .prune_pending_approvals()
             .expect("pending approvals should prune");
@@ -308,7 +348,7 @@ mod tests {
             .prune_session_traces()
             .expect("session traces should prune");
         assert_eq!(deleted_approvals, 1);
-        assert_eq!(deleted_traces, 2);
+        assert_eq!(deleted_traces, 1);
 
         drop(workspace);
     }
@@ -316,12 +356,19 @@ mod tests {
     fn sample_approval_record(session_id: &str) -> ApprovalSessionRecord {
         ApprovalSessionRecord {
             session_id: session_id.to_string(),
+            conversation_id: "conversation-1".to_string(),
+            turn_index: 1,
             task_id: format!("task-{session_id}"),
             task_input: "inspect repository".to_string(),
+            conversation_history: vec![ConversationTurnRecord {
+                role: "user".to_string(),
+                content: "previous question".to_string(),
+            }],
             agent_id: "agent-1".to_string(),
             loop_index: 2,
             max_loops: 8,
             token_budget: 32_000,
+            max_output_tokens: Some(4096),
             model_name: "mock-model".to_string(),
             allowed_tools: vec!["read_file".to_string()],
             read_roots: vec!["src".to_string()],
@@ -357,6 +404,8 @@ mod tests {
     fn sample_trace_record(session_id: &str) -> SessionTraceRecord {
         SessionTraceRecord {
             session_id: session_id.to_string(),
+            conversation_id: "conversation-1".to_string(),
+            turn_index: 1,
             task_id: format!("task-{session_id}"),
             task_input: "inspect repository".to_string(),
             agent_id: "agent-1".to_string(),
@@ -370,6 +419,7 @@ mod tests {
             token_budget: 32_000,
             tokens_estimate: 1024,
             tool_call_count: 2,
+            updated_at_ms: 1_717_171_717_000,
             trace: vec![TraceEvent::new(
                 session_id,
                 "agent-1",

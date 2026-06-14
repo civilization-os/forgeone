@@ -39,11 +39,32 @@ interface RunResult {
 
 interface HistoricalTrace {
   session_id: string;
+  conversation_id: string;
+  turn_index: number;
   task_input: string;
   status: string;
   loop_index: number;
   stop_reason: string;
   approval_required: boolean;
+  updated_at_ms: number;
+}
+
+interface ConversationTurn {
+  role: 'user' | 'agent';
+  content: string;
+}
+
+interface ConversationSummary {
+  conversation_id: string;
+  title: string;
+  session_id: string;
+  status: string;
+  loop_index: number;
+  latestSessionId: string;
+  latestStatus: string;
+  turnCount: number;
+  updatedAtMs: number;
+  sessionIds: string[];
 }
 
 interface Message {
@@ -55,6 +76,10 @@ interface Message {
   pendingApproval?: PendingApproval | null;
   status?: string;
   budgetUsage?: { tokens_estimate: number; tool_call_count: number };
+  streaming?: boolean; // 正在流式输出中
+  animateOnLoad?: boolean;
+  runStartedAt?: number;
+  runCompletedAt?: number;
 }
 
 interface ModelProfile {
@@ -73,6 +98,43 @@ interface ModelProfile {
   autoTruncate?: boolean;
 }
 
+interface MCPServer {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'streamable_http';
+  endpoint: string;
+  status: 'connected' | 'disabled' | 'error' | 'connecting';
+  permission: string;
+  authMode: string;
+  startupMode: string;
+  mountScope: 'global' | 'workspace' | 'session' | 'disabled';
+  mountTarget: string;
+  policyMode: string;
+  capabilities: {
+    tools: number;
+    resources: number;
+    prompts: number;
+  };
+  toolNames: string[];
+  resourceNames: string[];
+  promptNames: string[];
+  description: string;
+  lastHandshake: string;
+  lastTrace: string;
+  lastError?: string;
+  command?: string;
+  args?: string;
+  env?: Array<{ key: string; value: string }>;
+  remoteTransport?: 'SSE' | 'WebSocket';
+  timeout?: number;
+  headers?: Array<{ key: string; value: string }>;
+  sandbox?: boolean;
+}
+
+interface WindowState {
+  isMaximized: boolean;
+}
+
 // 国际化词典定义
 const translations = {
   zh: {
@@ -82,7 +144,7 @@ const translations = {
     tabChat: '聊天',
     tabProject: '项目',
     tabModel: '模型',
-    tabMcp: 'MCP 数据源',
+    tabMcp: 'MCP 服务',
     tabSkill: '技能插件',
     tabPolicy: '安全策略',
     tabTrace: '执行追踪',
@@ -99,6 +161,21 @@ const translations = {
     expandTrace: '展开执行 Trace 日志',
     collapseTrace: '折叠执行 Trace 日志',
     todayBadge: '今天',
+    runtimePreparing: '构建上下文',
+    runtimeReasoning: '模型推理',
+    runtimeTooling: '工具执行',
+    runtimeComposing: '整理响应',
+    runtimeRunning: '运行中',
+    runtimeElapsed: '已耗时',
+    runtimeTraceSummary: '执行摘要',
+    runtimeLoops: '轮次',
+    runtimeModelCalls: '模型调用',
+    runtimeToolCalls: '工具调用',
+    runtimeTotalTime: '总耗时',
+    contextBarTitle: '上下文',
+    contextBarUsage: '使用量',
+    contextBarTurns: '回合',
+    contextBarNoContext: '当前是空白上下文，新消息会开启新会话。',
     welcomeTitle: 'ForgeOne 控制台',
     welcomeText: '开放式智能代理运行时（Agent Runtime）控制台。在下方输入您的自然语言任务，Runtime 会拉起自治智能体循环（Agent Loop），透明地调用安全工具及 MCP 数据源以完成您的要求。',
     inputPlaceholder: '向 ForgeOne 描述您的开发任务，或指定指令...',
@@ -151,16 +228,16 @@ const translations = {
 
     // MCP Panel
     mcpTitle: 'Model Context Protocol',
-    mcpSub: '管理外部连接的数据源和工具服务，将它们在 Agent 运行时直接注入上下文。',
-    mcpAddBtn: '添加数据源',
-    mcpActiveConn: '已激活的 MCP 服务',
-    mcpActiveDesc: '已成功建立连接 of 外部进程',
-    mcpThroughput: '今日同步数据流量',
-    mcpThroughputDesc: '实时上下文通信报文大小',
-    mcpHealth: '协议健康指数',
-    mcpHealthDesc: '所有连接健康且处于就绪状态',
-    mcpSourceCardTitle: '配置的上下文数据源',
-    mcpConfigureBtn: '配置',
+    mcpSub: '管理 MCP Server 的连接、启停状态与暴露能力，让 Runtime 可控接入外部 tools、resources 与 prompts。',
+    mcpAddBtn: '添加 Server',
+    mcpActiveConn: '已连接 Server',
+    mcpActiveDesc: '当前处于 connected 状态的 MCP Server',
+    mcpThroughput: '暴露能力总数',
+    mcpThroughputDesc: '所有已注册 tools、resources、prompts 的汇总',
+    mcpHealth: '异常 Server',
+    mcpHealthDesc: '需要处理的 error / connecting 状态实例',
+    mcpSourceCardTitle: 'MCP Server 列表',
+    mcpConfigureBtn: '详情',
 
     // Skill Panel
     skillTitle: '智能体技能插件',
@@ -195,6 +272,9 @@ const translations = {
     traceBannerText: '以下为当前载入的 Trace 的执行轨迹日志，记录了每次模型推理所调用的底层参数与受保护工具的回执响应。',
     traceEmptyList: '暂无历史执行轨迹',
     traceEmptyDetail: '请在左侧列表中点击选择要分析调试的 Trace 会话记录。',
+    historyListTitle: '历史记录',
+    historyDeleteTitle: '删除这条历史记录',
+    historyClearTitle: '清空历史记录',
 
     // Settings Modal
     setModalTitle: 'ForgeOne 软件偏好设置',
@@ -232,6 +312,21 @@ const translations = {
     expandTrace: 'Expand Trace Logs',
     collapseTrace: 'Collapse Trace Logs',
     todayBadge: 'TODAY',
+    runtimePreparing: 'Preparing Context',
+    runtimeReasoning: 'Reasoning',
+    runtimeTooling: 'Tool Execution',
+    runtimeComposing: 'Composing Response',
+    runtimeRunning: 'Running',
+    runtimeElapsed: 'Elapsed',
+    runtimeTraceSummary: 'Execution Summary',
+    runtimeLoops: 'Loops',
+    runtimeModelCalls: 'Model Calls',
+    runtimeToolCalls: 'Tool Calls',
+    runtimeTotalTime: 'Total Time',
+    contextBarTitle: 'Context',
+    contextBarUsage: 'Usage',
+    contextBarTurns: 'Turns',
+    contextBarNoContext: 'Blank context. Your next message will start a new conversation.',
     welcomeTitle: 'ForgeOne Console',
     welcomeText: 'Welcome to the ForgeOne Agent Runtime Console. Describe your development goal below. The runtime will initialize the Agent Loop, transparently invoking tools and MCP database context providers to fulfill your goal.',
     inputPlaceholder: 'Message ForgeOne or describe your tasks...',
@@ -284,16 +379,16 @@ const translations = {
 
     // MCP Panel
     mcpTitle: 'Model Context Protocol',
-    mcpSub: 'Inject external database schemas, APIs, and microservice contexts to agent loop.',
-    mcpAddBtn: 'Add Source',
-    mcpActiveConn: 'Active Connections',
-    mcpActiveDesc: 'Connected external harness processes',
-    mcpThroughput: 'Data Throughput',
-    mcpThroughputDesc: 'Size of transferred serialization content',
-    mcpHealth: 'Protocol Health',
-    mcpHealthDesc: 'All data feeds are connected and nominal',
-    mcpSourceCardTitle: 'Configured Data Feeds',
-    mcpConfigureBtn: 'Configure',
+    mcpSub: 'Manage MCP servers, lifecycle, and exposed tools, resources, and prompts for the runtime.',
+    mcpAddBtn: 'Add Server',
+    mcpActiveConn: 'Connected Servers',
+    mcpActiveDesc: 'MCP servers currently in connected state',
+    mcpThroughput: 'Exposed Capabilities',
+    mcpThroughputDesc: 'Aggregate tools, resources, and prompts available to the runtime',
+    mcpHealth: 'Servers With Issues',
+    mcpHealthDesc: 'Instances currently in error or connecting state',
+    mcpSourceCardTitle: 'MCP Server List',
+    mcpConfigureBtn: 'Details',
 
     // Skill Panel
     skillTitle: 'Agent Skills',
@@ -328,6 +423,9 @@ const translations = {
     traceBannerText: 'Following lists the raw trace log of model invocations, decision trees, and tool execution reports.',
     traceEmptyList: 'No history traces',
     traceEmptyDetail: 'Select a trace session from the left sidebar to audit.',
+    historyListTitle: 'History',
+    historyDeleteTitle: 'Delete this history entry',
+    historyClearTitle: 'Clear history',
 
     // Settings Modal
     setModalTitle: 'ForgeOne Preferences',
@@ -499,6 +597,14 @@ function Icon({ name, className = '', style = {} }: { name: string; className?: 
         <line x1="6" y1="6" x2="18" y2="18"></line>
       </>
     ),
+    minimize: <line x1="6" y1="12" x2="18" y2="12"></line>,
+    maximize: <rect x="5.5" y="5.5" width="13" height="13" rx="1"></rect>,
+    restore: (
+      <>
+        <path d="M9 7h8v8"></path>
+        <path d="M7 9h8v8H7z"></path>
+      </>
+    ),
     arrow_upward: (
       <>
         <line x1="12" y1="19" x2="12" y2="5"></line>
@@ -618,6 +724,12 @@ function Icon({ name, className = '', style = {} }: { name: string; className?: 
         <line x1="1" y1="1" x2="23" y2="23"></line>
       </>
     ),
+    arrow_back: (
+      <>
+        <line x1="19" y1="12" x2="5" y2="12"></line>
+        <polyline points="12 19 5 12 12 5"></polyline>
+      </>
+    ),
     tune: (
       <>
         <line x1="4" y1="21" x2="4" y2="14"></line>
@@ -678,7 +790,772 @@ const OFFICIAL_VENDORS: OfficialVendor[] = [
   { key: 'OpenRouter', name: 'OpenRouter', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', defaultModelId: 'google/gemini-pro', placeholderKey: 'sk-or-...', models: ['google/gemini-pro', 'meta-llama/llama-3-8b-instruct', 'anthropic/claude-3.5-sonnet'] }
 ];
 
+function inferSuggestedOutputTokens(modelId: string): number {
+  const normalized = modelId.trim().toLowerCase();
+
+  if (!normalized) {
+    return 4096;
+  }
+
+  if (
+    normalized.includes('deepseek') ||
+    normalized.includes('gpt-4.1') ||
+    normalized.includes('gpt-4o') ||
+    normalized.includes('claude-3') ||
+    normalized.includes('sonnet') ||
+    normalized.includes('opus') ||
+    normalized.includes('pro') ||
+    normalized.includes('large') ||
+    normalized.includes('70b') ||
+    normalized.includes('32b')
+  ) {
+    return 8192;
+  }
+
+  if (
+    normalized.includes('14b') ||
+    normalized.includes('coder') ||
+    normalized.includes('gemini') ||
+    normalized.includes('mistral')
+  ) {
+    return 4096;
+  }
+
+  return 4096;
+}
+
+function inferRuntimeContextWindow(modelId: string, protocol: 'openai' | 'anthropic'): number {
+  const normalized = modelId.trim().toLowerCase();
+
+  if (protocol === 'openai' || protocol === 'anthropic') {
+    if (normalized.includes('gpt-4.1')) {
+      return 1_000_000;
+    }
+    return 128_000;
+  }
+
+  return 32_000;
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`;
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 1)}K`;
+  }
+  return `${value}`;
+}
+
+// ─── MessageContent ───────────────────────────────────────────────────────────
+// \u6e32\u67d3\u4e00\u6761\u6d88\u606f\u7684\u5185\u5bb9\uff0c\u652f\u6301\uff1a
+//  1. \u6d41\u5f0f\u5149\u6807\uff08streaming=true \u65f6\u663e\u793a\u95ea\u70c1\u7684 | \uff09
+//  2. <think>...</think> \u53ef\u6298\u53e0\u601d\u8003\u5757
+//  3. \u666e\u901a\u6587\u672c\u6e32\u67d3
+// ──────────────────────────────────────────────────────────────────────────────
+function parseThinkBlocks(text: string): Array<{ type: 'think' | 'text'; content: string }> {
+  const parts: Array<{ type: 'think' | 'text'; content: string }> = [];
+  // \u652f\u6301 <think> \u548c <thinking> \u4e24\u79cd\u6807\u7b7e\uff08Qwen3 / DeepSeek \u7b49\uff09
+  const regex = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', content: text.slice(lastIndex, match.index) });
+    }
+    parts.push({ type: 'think', content: match[1].trim() });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push({ type: 'text', content: text.slice(lastIndex) });
+  }
+  return parts.length ? parts : [{ type: 'text', content: text }];
+}
+
+type FormattedSegment =
+  | { type: 'text'; content: string }
+  | { type: 'code'; content: string; language: string };
+
+type StructuredTableData = {
+  kind: 'windows-dir';
+  title: string;
+  subtitle?: string;
+  columns: string[];
+  rows: string[][];
+  summary: string[];
+};
+
+type InlineToken =
+  | { type: 'text'; content: string }
+  | { type: 'code'; content: string };
+
+type MarkdownBlock =
+  | { type: 'heading'; level: number; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'unordered-list'; items: string[] }
+  | { type: 'ordered-list'; items: string[] }
+  | { type: 'blockquote'; lines: string[] };
+
+function parseFormattedSegments(text: string): FormattedSegment[] {
+  const segments: FormattedSegment[] = [];
+  const regex = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', content: text.slice(lastIndex, match.index) });
+    }
+    segments.push({
+      type: 'code',
+      language: match[1].trim().toLowerCase(),
+      content: match[2].replace(/\r/g, '').trim(),
+    });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    segments.push({ type: 'text', content: text.slice(lastIndex) });
+  }
+
+  return segments.length ? segments : [{ type: 'text', content: text }];
+}
+
+function parseInlineTokens(text: string): InlineToken[] {
+  const tokens: InlineToken[] = [];
+  const regex = /`([^`\n]+)`/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      tokens.push({ type: 'text', content: text.slice(lastIndex, match.index) });
+    }
+    tokens.push({ type: 'code', content: match[1] });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    tokens.push({ type: 'text', content: text.slice(lastIndex) });
+  }
+
+  return tokens.length ? tokens : [{ type: 'text', content: text }];
+}
+
+function parseMarkdownBlocks(text: string): MarkdownBlock[] {
+  const normalized = text.replace(/\r/g, '');
+  const lines = normalized.split('\n');
+  const blocks: MarkdownBlock[] = [];
+  let index = 0;
+
+  const flushParagraph = (buffer: string[]) => {
+    const content = buffer.join('\n').trim();
+    if (content) {
+      blocks.push({ type: 'paragraph', text: content });
+    }
+    buffer.length = 0;
+  };
+
+  const paragraphBuffer: string[] = [];
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph(paragraphBuffer);
+      index += 1;
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph(paragraphBuffer);
+      blocks.push({
+        type: 'heading',
+        level: headingMatch[1].length,
+        text: headingMatch[2].trim(),
+      });
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      flushParagraph(paragraphBuffer);
+      const quoteLines: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        if (!/^>\s?/.test(current)) break;
+        quoteLines.push(current.replace(/^>\s?/, ''));
+        index += 1;
+      }
+      blocks.push({ type: 'blockquote', lines: quoteLines });
+      continue;
+    }
+
+    if (/^[-*+]\s+/.test(trimmed)) {
+      flushParagraph(paragraphBuffer);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        const match = current.match(/^[-*+]\s+(.+)$/);
+        if (!match) break;
+        items.push(match[1].trim());
+        index += 1;
+      }
+      blocks.push({ type: 'unordered-list', items });
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      flushParagraph(paragraphBuffer);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        const match = current.match(/^\d+\.\s+(.+)$/);
+        if (!match) break;
+        items.push(match[1].trim());
+        index += 1;
+      }
+      blocks.push({ type: 'ordered-list', items });
+      continue;
+    }
+
+    paragraphBuffer.push(line);
+    index += 1;
+  }
+
+  flushParagraph(paragraphBuffer);
+  return blocks.length ? blocks : [{ type: 'paragraph', text: normalized }];
+}
+
+function formatCodeForDisplay(code: string, language: string): string {
+  const normalized = code.replace(/\r/g, '').trim();
+  const lang = language.toLowerCase();
+  const maybeJson = lang === 'json' || (!lang && /^[\[{]/.test(normalized));
+
+  if (maybeJson) {
+    try {
+      return JSON.stringify(JSON.parse(normalized), null, 2);
+    } catch {
+      return normalized;
+    }
+  }
+
+  return normalized;
+}
+
+function parseWindowsDirectoryTable(code: string, lang: 'zh' | 'en'): StructuredTableData | null {
+  const lines = code
+    .replace(/\u0000/g, '')
+    .split('\n')
+    .map(line => line.trimEnd());
+  const entryRegex = /^\s*(\d{4}[/-]\d{2}[/-]\d{2})\s+(\d{1,2}:\d{2})(?:\s+(AM|PM))?\s+(<DIR>|[\d,]+)\s+(.+?)\s*$/i;
+  const rows: string[][] = [];
+  let firstEntryIndex = -1;
+  let lastEntryIndex = -1;
+
+  lines.forEach((line, index) => {
+    const match = line.match(entryRegex);
+    if (!match) return;
+    const [, date, time, ampm, marker, name] = match;
+    const timeLabel = ampm ? `${date} ${time} ${ampm}` : `${date} ${time}`;
+    const isDir = marker.toUpperCase() === '<DIR>';
+    rows.push([
+      timeLabel,
+      isDir ? (lang === 'zh' ? '文件夹' : 'Folder') : (lang === 'zh' ? '文件' : 'File'),
+      isDir ? '-' : marker,
+      name,
+    ]);
+    if (firstEntryIndex === -1) {
+      firstEntryIndex = index;
+    }
+    lastEntryIndex = index;
+  });
+
+  if (rows.length < 2) {
+    return null;
+  }
+
+  const candidatePath = lines
+    .slice(0, Math.max(0, firstEntryIndex))
+    .map(line => line.trim())
+    .reverse()
+    .find(line => /[A-Za-z]:\\/.test(line) || /directory of/i.test(line) || /目录/.test(line));
+
+  const subtitle = candidatePath
+    ? candidatePath
+        .replace(/^directory of\s+/i, '')
+        .replace(/\s+的目录$/, '')
+        .trim()
+    : undefined;
+
+  const summary = lines
+    .slice(lastEntryIndex + 1)
+    .map(line => line.trim())
+    .filter(line => line && /\d/.test(line))
+    .slice(0, 2);
+
+  return {
+    kind: 'windows-dir',
+    title: lang === 'zh' ? '目录结果' : 'Directory Listing',
+    subtitle,
+    columns: lang === 'zh'
+      ? ['修改时间', '类型', '大小', '名称']
+      : ['Modified', 'Type', 'Size', 'Name'],
+    rows,
+    summary,
+  };
+}
+
+function StructuredTableView({ table }: { table: StructuredTableData }) {
+  return (
+    <div className="structured-output-table-wrap">
+      {table.subtitle && <div className="structured-output-path">{table.subtitle}</div>}
+      <div className="structured-output-table-scroll">
+        <table className="structured-output-table">
+          <thead>
+            <tr>
+              {table.columns.map(column => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row, rowIndex) => (
+              <tr key={`${row[row.length - 1]}-${rowIndex}`}>
+                {row.map((cell, cellIndex) => (
+                  <td key={`${cellIndex}-${cell}`}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {table.summary.length > 0 && (
+        <div className="structured-output-summary">
+          {table.summary.map(line => (
+            <span key={line}>{line}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FormattedCodeBlock({
+  code,
+  language,
+  lang,
+}: {
+  code: string;
+  language: string;
+  lang: 'zh' | 'en';
+}) {
+  const formattedCode = React.useMemo(() => formatCodeForDisplay(code, language), [code, language]);
+  const table = React.useMemo(() => parseWindowsDirectoryTable(formattedCode, lang), [formattedCode, lang]);
+  const [view, setView] = React.useState<'table' | 'raw'>(table ? 'table' : 'raw');
+  const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    setView(table ? 'table' : 'raw');
+  }, [table, formattedCode]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(formattedCode);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch (error) {
+      console.error('Failed to copy code block', error);
+    }
+  };
+
+  return (
+    <div className="formatted-output-card">
+      <div className="formatted-output-header">
+        <div className="formatted-output-title-group">
+          <span className="formatted-output-title">{lang === 'zh' ? '格式化输出' : 'Formatted Output'}</span>
+          {language && <span className="formatted-output-badge">{language}</span>}
+        </div>
+        <div className="formatted-output-actions">
+          {table && (
+            <div className="formatted-output-toggle-group">
+              <button
+                type="button"
+                className={`formatted-output-toggle ${view === 'table' ? 'active' : ''}`}
+                onClick={() => setView('table')}
+              >
+                {lang === 'zh' ? '表格' : 'Table'}
+              </button>
+              <button
+                type="button"
+                className={`formatted-output-toggle ${view === 'raw' ? 'active' : ''}`}
+                onClick={() => setView('raw')}
+              >
+                {lang === 'zh' ? '原文' : 'Raw'}
+              </button>
+            </div>
+          )}
+          <button
+            type="button"
+            className="formatted-output-copy"
+            onClick={handleCopy}
+            title={lang === 'zh' ? '复制代码块' : 'Copy code block'}
+          >
+            {copied ? (lang === 'zh' ? '已复制' : 'Copied') : (lang === 'zh' ? '复制' : 'Copy')}
+          </button>
+        </div>
+      </div>
+      {table && view === 'table'
+        ? <StructuredTableView table={table} />
+        : <pre className="formatted-output-pre">{formattedCode}</pre>}
+    </div>
+  );
+}
+
+function InlineMarkdown({ text }: { text: string }) {
+  const tokens = parseInlineTokens(text);
+  return (
+    <>
+      {tokens.map((token, index) => (
+        token.type === 'code'
+          ? <code key={`inline-code-${index}`} className="message-inline-code">{token.content}</code>
+          : <React.Fragment key={`inline-text-${index}`}>{token.content}</React.Fragment>
+      ))}
+    </>
+  );
+}
+
+function MarkdownTextBlock({ text }: { text: string }) {
+  const blocks = parseMarkdownBlocks(text);
+
+  return (
+    <div className="message-markdown-blocks">
+      {blocks.map((block, index) => {
+        if (block.type === 'heading') {
+          const Tag = `h${Math.min(block.level + 2, 6)}` as keyof JSX.IntrinsicElements;
+          return (
+            <Tag key={`heading-${index}`} className={`message-heading heading-level-${block.level}`}>
+              <InlineMarkdown text={block.text} />
+            </Tag>
+          );
+        }
+
+        if (block.type === 'unordered-list') {
+          return (
+            <ul key={`ul-${index}`} className="message-list">
+              {block.items.map((item, itemIndex) => (
+                <li key={`ul-item-${itemIndex}`}><InlineMarkdown text={item} /></li>
+              ))}
+            </ul>
+          );
+        }
+
+        if (block.type === 'ordered-list') {
+          return (
+            <ol key={`ol-${index}`} className="message-list ordered">
+              {block.items.map((item, itemIndex) => (
+                <li key={`ol-item-${itemIndex}`}><InlineMarkdown text={item} /></li>
+              ))}
+            </ol>
+          );
+        }
+
+        if (block.type === 'blockquote') {
+          return (
+            <blockquote key={`quote-${index}`} className="message-quote">
+              {block.lines.map((line, lineIndex) => (
+                <div key={`quote-line-${lineIndex}`}><InlineMarkdown text={line} /></div>
+              ))}
+            </blockquote>
+          );
+        }
+
+        return (
+          <p key={`paragraph-${index}`} className="message-paragraph">
+            <InlineMarkdown text={block.text} />
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function MessageTextBody({ text, lang }: { text: string; lang: 'zh' | 'en' }) {
+  const segments = parseFormattedSegments(text);
+
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.type === 'code') {
+          return (
+            <FormattedCodeBlock
+              key={`code-${index}`}
+              code={segment.content}
+              language={segment.language}
+              lang={lang}
+            />
+          );
+        }
+
+        return (
+          <MarkdownTextBlock key={`text-${index}`} text={segment.content} />
+        );
+      })}
+    </>
+  );
+}
+
+function ThinkBlock({ content }: { content: string }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="think-block">
+      <button className="think-toggle" onClick={() => setOpen(o => !o)}>
+        <span className="think-icon">{open ? '▾' : '▸'}</span>
+        <span className="think-label">{open ? '\u6536\u8d77\u601d\u8003\u8fc7\u7a0b' : '\u5c55\u5f00\u601d\u8003\u8fc7\u7a0b'}</span>
+      </button>
+      {open && (
+        <div className="think-content">{content}</div>
+      )}
+    </div>
+  );
+}
+
+function formatDuration(ms: number, lang: 'zh' | 'en') {
+  const seconds = ms / 1000;
+  if (seconds < 10) {
+    return lang === 'zh' ? `${seconds.toFixed(1)} 秒` : `${seconds.toFixed(1)}s`;
+  }
+  if (seconds < 60) {
+    return lang === 'zh' ? `${Math.round(seconds)} 秒` : `${Math.round(seconds)}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = Math.round(seconds % 60);
+  return lang === 'zh'
+    ? `${minutes} 分 ${restSeconds} 秒`
+    : `${minutes}m ${restSeconds}s`;
+}
+
+function buildTraceStats(trace: TraceEvent[] = []) {
+  if (!trace.length) {
+    return {
+      totalMs: 0,
+      loops: 0,
+      modelCalls: 0,
+      toolCalls: 0,
+    };
+  }
+
+  const timestamps = trace.map(evt => evt.timestamp_ms).filter(Boolean);
+  const totalMs = timestamps.length ? Math.max(...timestamps) - Math.min(...timestamps) : 0;
+  const loops = trace.reduce((max, evt) => Math.max(max, evt.loop_index || 0), 0);
+  const modelCalls = trace.filter(evt => evt.kind === 'ModelRequested').length;
+  const toolCalls = trace.filter(evt => evt.kind === 'ToolCompleted').length;
+
+  return {
+    totalMs,
+    loops,
+    modelCalls,
+    toolCalls,
+  };
+}
+
+function nextConversationId() {
+  return `conversation-${Date.now()}`;
+}
+
+function serializeConversationHistory(messages: Message[]): ConversationTurn[] {
+  return messages
+    .filter(message => {
+      if (!message.content.trim()) return false;
+      if (message.streaming) return false;
+      return message.sender === 'user' || message.sender === 'agent';
+    })
+    .map(message => ({
+      role: message.sender,
+      content: message.content,
+    }));
+}
+
+function buildConversationSummaries(traces: HistoricalTrace[]): ConversationSummary[] {
+  const grouped = new Map<string, HistoricalTrace[]>();
+
+  for (const trace of traces) {
+    const key = trace.conversation_id || trace.session_id;
+    const items = grouped.get(key) || [];
+    items.push(trace);
+    grouped.set(key, items);
+  }
+
+  return Array.from(grouped.entries())
+    .map(([conversationId, items]) => {
+      const ordered = [...items].sort((a, b) => {
+        if (a.turn_index !== b.turn_index) {
+          return a.turn_index - b.turn_index;
+        }
+        return a.updated_at_ms - b.updated_at_ms;
+      });
+      const latest = [...ordered].sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
+      const titleSource = ordered[0]?.task_input || latest?.task_input || conversationId;
+
+      return {
+        conversation_id: conversationId,
+        title: titleSource,
+        session_id: latest?.session_id || ordered[ordered.length - 1]?.session_id || conversationId,
+        status: latest?.status || 'completed',
+        loop_index: latest?.loop_index || 0,
+        latestSessionId: latest?.session_id || ordered[ordered.length - 1]?.session_id || conversationId,
+        latestStatus: latest?.status || 'completed',
+        turnCount: ordered.length,
+        updatedAtMs: latest?.updated_at_ms || 0,
+        sessionIds: ordered.map(item => item.session_id),
+      };
+    })
+    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+}
+
+function inferRuntimePhase(elapsedMs: number, t: typeof translations['zh']) {
+  const phases = [
+    t.runtimePreparing,
+    t.runtimeReasoning,
+    t.runtimeTooling,
+    t.runtimeComposing,
+  ];
+  const phaseIndex = Math.min(Math.floor(elapsedMs / 1800), phases.length - 1);
+  return phases[phaseIndex];
+}
+
+function MessageContent({ msg, lang }: { msg: Message; lang: 'zh' | 'en' }) {
+  const [displayed, setDisplayed] = React.useState('');
+  const [done, setDone] = React.useState(false);
+  const prevContent = React.useRef('');
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    const full = msg.content || '';
+    if (!msg.animateOnLoad) {
+      prevContent.current = full;
+      setDisplayed(full);
+      setDone(true);
+      return;
+    }
+    // \u5982\u679c streaming \u5df2\u7ed3\u675f\uff08streaming=false\uff09\uff0c\u5c31\u505a typewriter \u52a8\u753b
+    if (!msg.streaming && full !== prevContent.current) {
+      prevContent.current = full;
+      setDone(false);
+      let i = 0;
+      const speed = full.length > 800 ? 4 : full.length > 300 ? 8 : 14; // ms/\u5b57
+      const tick = () => {
+        i += Math.ceil(full.length / 300); // \u81ea\u9002\u5e94\u5757\u5927\u5c0f
+        if (i >= full.length) {
+          setDisplayed(full);
+          setDone(true);
+          return;
+        }
+        setDisplayed(full.slice(0, i));
+        timerRef.current = setTimeout(tick, speed);
+      };
+      timerRef.current = setTimeout(tick, speed);
+      return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+    }
+    if (msg.streaming) {
+      setDisplayed('');
+      setDone(false);
+    }
+  }, [msg.animateOnLoad, msg.content, msg.streaming]);
+
+  // \u6d41\u5f0f\u72b6\u6001\uff1a\u663e\u793a\u95ea\u70c1\u5149\u6807
+  if (msg.streaming) {
+    return (
+      <div className="message-text streaming-text">
+        <span className="streaming-cursor" />
+      </div>
+    );
+  }
+
+  // \u89e3\u6790 think \u5757
+  const text = done ? msg.content : displayed;
+  const parts = parseThinkBlocks(text);
+
+  return (
+    <div className="message-text">
+      {parts.map((part, i) =>
+        part.type === 'think'
+          ? <ThinkBlock key={i} content={part.content} />
+          : <MessageTextBody key={i} text={part.content} lang={lang} />
+      )}
+      {!done && <span className="streaming-cursor" />}
+    </div>
+  );
+}
+
+function MessageRuntimeMeta({
+  msg,
+  nowMs,
+  lang,
+  t,
+}: {
+  msg: Message;
+  nowMs: number;
+  lang: 'zh' | 'en';
+  t: typeof translations['zh'];
+}) {
+  if (msg.sender !== 'agent') return null;
+
+  const startedAt = msg.runStartedAt ?? msg.timestamp;
+  const finishedAt = msg.runCompletedAt ?? (msg.streaming ? nowMs : startedAt);
+  const elapsedMs = Math.max(0, finishedAt - startedAt);
+  const stats = buildTraceStats(msg.trace || []);
+
+  if (msg.streaming) {
+    return (
+      <div className="runtime-meta-card">
+        <div className="runtime-meta-header">
+          <span className="runtime-live-pill">{t.runtimeRunning}</span>
+          <span className="runtime-phase-text">{inferRuntimePhase(elapsedMs, t)}</span>
+          <span className="runtime-elapsed-text">
+            {t.runtimeElapsed} {formatDuration(elapsedMs, lang)}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!msg.trace?.length && !elapsedMs) {
+    return null;
+  }
+
+  return (
+    <div className="runtime-meta-card">
+      <div className="runtime-meta-header">
+        <span className="runtime-summary-label">{t.runtimeTraceSummary}</span>
+        <span className="runtime-elapsed-text">
+          {t.runtimeTotalTime} {formatDuration(stats.totalMs || elapsedMs, lang)}
+        </span>
+      </div>
+      <div className="runtime-stats-grid">
+        <div className="runtime-stat-chip">
+          <span>{t.runtimeLoops}</span>
+          <strong>{stats.loops || 1}</strong>
+        </div>
+        <div className="runtime-stat-chip">
+          <span>{t.runtimeModelCalls}</span>
+          <strong>{stats.modelCalls}</strong>
+        </div>
+        <div className="runtime-stat-chip">
+          <span>{t.runtimeToolCalls}</span>
+          <strong>{stats.toolCalls}</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function App() {
+  const forgeoneDesktop = (window as any).forgeone;
   // 核心板块切换状态：'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'
   const [activeTab, setActiveTab] = useState<'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'>('chat');
   
@@ -695,6 +1572,33 @@ export default function App() {
     }
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!forgeoneDesktop?.onWindowStateChange) return;
+
+    let mounted = true;
+    forgeoneDesktop
+      .getWindowState?.()
+      .then((state: WindowState) => {
+        if (mounted && state) {
+          setWindowState({ isMaximized: Boolean(state.isMaximized) });
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Failed to load window state', error);
+      });
+
+    const unsubscribe = forgeoneDesktop.onWindowStateChange((state: WindowState) => {
+      setWindowState({ isMaximized: Boolean(state?.isMaximized) });
+    });
+
+    return () => {
+      mounted = false;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, []);
   
   // 语言选项状态（默认中文 'zh'，可在设置中切换为 'en'）
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
@@ -705,16 +1609,57 @@ export default function App() {
   const [httpProxy, setHttpProxy] = useState('http://127.0.0.1:7890');
   const [socksProxy, setSocksProxy] = useState('');
   const [clearCacheOnExit, setClearCacheOnExit] = useState(false);
+  const [windowState, setWindowState] = useState<WindowState>({ isMaximized: false });
+
+  // MCP 视图控制与表单输入状态
+  const [mcpView, setMcpView] = useState<'list' | 'form'>('list');
+  const [mcpFormMode, setMcpFormMode] = useState<'create' | 'edit'>('create');
+  const [mcpFormServerId, setMcpFormServerId] = useState<string | null>(null);
+
+  const [mcpFormName, setMcpFormName] = useState('');
+  const [mcpFormType, setMcpFormType] = useState<'local' | 'remote'>('local');
+  const [mcpFormCommand, setMcpFormCommand] = useState('');
+  const [mcpFormArgs, setMcpFormArgs] = useState('');
+  const [mcpFormEnv, setMcpFormEnv] = useState<Array<{ key: string; value: string }>>([{ key: '', value: '' }]);
+  const [mcpFormRemoteTransport, setMcpFormRemoteTransport] = useState<'SSE' | 'WebSocket'>('SSE');
+  const [mcpFormTimeout, setMcpFormTimeout] = useState(30000);
+  const [mcpFormUrl, setMcpFormUrl] = useState('');
+  const [mcpFormHeaders, setMcpFormHeaders] = useState<Array<{ key: string; value: string }>>([{ key: '', value: '' }]);
+  const [mcpFormSandbox, setMcpFormSandbox] = useState(true);
 
   // 聊天交互相关状态
   const [inputText, setInputText] = useState('');
+  const [inputHistory, setInputHistory] = useState<string[]>(() => {
+    const saved = localStorage.getItem('forgeone_input_history');
+    if (!saved) return [];
+
+    try {
+      const parsed = JSON.parse(saved);
+      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [inputHistoryIndex, setInputHistoryIndex] = useState<number | null>(null);
+  const [inputDraft, setInputDraft] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [tracesList, setTracesList] = useState<HistoricalTrace[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [traceExpanded, setTraceExpanded] = useState<Record<string, boolean>>({});
   const [isApprovalCollapsed, setIsApprovalCollapsed] = useState(false);
+  const [runtimeNowMs, setRuntimeNowMs] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const conversationSummaries = buildConversationSummaries(tracesList);
+  const conversationTraceEvents = messages
+    .filter(message => message.sender === 'agent' && Array.isArray(message.trace))
+    .flatMap(message => message.trace || []);
+  const currentConversationSummary = selectedConversationId
+    ? conversationSummaries.find(item => item.conversation_id === selectedConversationId) || null
+    : null;
+  const latestAgentMessage = [...messages].reverse().find(message => message.sender === 'agent') || null;
 
   // 项目面板状态
   const [projectRoot, setProjectRoot] = useState('D:/project/forgeone');
@@ -784,6 +1729,13 @@ export default function App() {
   });
 
   const activeProfile = profiles.find(p => p.id === activeProfileId);
+  const activeContextWindow = activeProfile
+    ? inferRuntimeContextWindow(activeProfile.modelId, activeProfile.protocol)
+    : 32_000;
+  const currentContextTokens = latestAgentMessage?.budgetUsage?.tokens_estimate || 0;
+  const currentContextRatio = activeContextWindow > 0
+    ? Math.min(100, (currentContextTokens / activeContextWindow) * 100)
+    : 0;
 
   const [showMiniSelector, setShowMiniSelector] = useState(false);
 
@@ -794,7 +1746,7 @@ export default function App() {
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
 
   // 连接测试状态
-  const [connectionStatus, setConnectionStatus] = useState<Record<string, { status: 'testing' | 'success' | 'failed', delay?: number }>>({});
+  const [connectionStatus, setConnectionStatus] = useState<Record<string, { status: 'testing' | 'success' | 'failed', delay?: number, error?: string }>>({});
 
   // 二级编辑表单的临时状态
   const [formName, setFormName] = useState('');
@@ -814,6 +1766,7 @@ export default function App() {
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
+  const inferredContextWindow = inferRuntimeContextWindow(formModelId, formProtocol);
 
   // 持久化存储
   useEffect(() => {
@@ -824,13 +1777,63 @@ export default function App() {
     localStorage.setItem('active_profile_id', activeProfileId);
   }, [activeProfileId]);
 
+  useEffect(() => {
+    localStorage.setItem('forgeone_input_history', JSON.stringify(inputHistory.slice(0, 50)));
+  }, [inputHistory]);
+
   // MCP 面板状态
-  const [mcpSources, setMcpSources] = useState([
-    { id: 1, name: 'PostgreSQL 生产数据库', type: 'Database/JDBC', uri: 'postgresql://db.internal:5432/main', status: 'connected', permission: '只读' },
-    { id: 2, name: 'Stripe 支付 API', type: 'OpenAPI/REST', uri: 'https://api.stripe.com/v1', status: 'connected', permission: '完全读写' },
-    { id: 3, name: 'Redis 主缓存集群', type: 'Key-Value', uri: 'redis://cache-cluster-01:6379', status: 'degraded', permission: '键值读写' },
-    { id: 4, name: ' Notion 技术开发文档库', type: 'Vector Search', uri: 'Workspace: Engineering', status: 'paused', permission: '向量查询' }
-  ]);
+  const [mcpServers, setMcpServers] = useState<MCPServer[]>(() => {
+    const saved = localStorage.getItem('forgeone_mcp_servers');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // 过滤掉虚拟的 Mock 数据，只保留本地真实服务和用户添加的自定义服务
+          const filtered = parsed.filter((s: any) => s && (s.id === 'filesystem-local' || s.id.startsWith('custom-')));
+          // 立即同步回 localStorage，避免被其它地方覆盖
+          localStorage.setItem('forgeone_mcp_servers', JSON.stringify(filtered));
+          return filtered;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    const defaultList: MCPServer[] = [
+      {
+        id: 'filesystem-local',
+        name: 'filesystem-local',
+        transport: 'stdio',
+        endpoint: 'npx @modelcontextprotocol/server-filesystem D:\\project\\forgeone',
+        status: 'connected',
+        permission: 'workspace read/write',
+        authMode: 'none',
+        startupMode: 'spawn on app boot',
+        mountScope: 'workspace',
+        mountTarget: 'ForgeOne Core workspace',
+        policyMode: 'allowed for current workspace',
+        capabilities: { tools: 6, resources: 4, prompts: 0 },
+        toolNames: ['read_file', 'write_file', 'list_directory', 'move_file', 'stat_path', 'glob_search'],
+        resourceNames: ['workspace://root', 'workspace://src', 'workspace://docs', 'workspace://recent'],
+        promptNames: [],
+        description: '本地文件系统 Server，向 Runtime 暴露工作区读写与目录资源。',
+        lastHandshake: '2026-06-14 21:30',
+        lastTrace: '2 minutes ago'
+      }
+    ];
+    localStorage.setItem('forgeone_mcp_servers', JSON.stringify(defaultList));
+    return defaultList;
+  });
+
+  useEffect(() => {
+    const filtered = mcpServers.filter((s: any) => s && (s.id === 'filesystem-local' || s.id.startsWith('custom-')));
+    if (filtered.length !== mcpServers.length) {
+      setMcpServers(filtered);
+    } else {
+      localStorage.setItem('forgeone_mcp_servers', JSON.stringify(mcpServers));
+    }
+  }, [mcpServers]);
+
+  const [selectedMcpServerId, setSelectedMcpServerId] = useState<string>('');
 
   // 技能面板状态
   const [skills, setSkills] = useState([
@@ -854,7 +1857,21 @@ export default function App() {
 
   // 聊天滚到底部
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const timer = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [messages]);
+
+  useEffect(() => {
+    const hasStreamingMessage = messages.some(message => message.streaming);
+    if (!hasStreamingMessage) return;
+
+    const timer = window.setInterval(() => {
+      setRuntimeNowMs(Date.now());
+    }, 250);
+
+    return () => window.clearInterval(timer);
   }, [messages]);
 
   const loadTraces = async () => {
@@ -866,6 +1883,75 @@ export default function App() {
     }
   };
 
+  const loadConversation = async (conversationId: string, preferredSessionId?: string | null) => {
+    const related = tracesList
+      .filter(item => (item.conversation_id || item.session_id) === conversationId)
+      .sort((a, b) => {
+        if (a.turn_index !== b.turn_index) {
+          return a.turn_index - b.turn_index;
+        }
+        return a.updated_at_ms - b.updated_at_ms;
+      });
+
+    if (!related.length) {
+      setMessages([]);
+      setSelectedConversationId(conversationId);
+      setSelectedSessionId(preferredSessionId || null);
+      return;
+    }
+
+    try {
+      const records = await Promise.all(
+        related.map(item => (window as any).forgeone.inspectTrace(item.session_id))
+      );
+
+      const orderedRecords = records.filter(Boolean).sort((a, b) => {
+        if ((a.turn_index || 0) !== (b.turn_index || 0)) {
+          return (a.turn_index || 0) - (b.turn_index || 0);
+        }
+        return (a.updated_at_ms || 0) - (b.updated_at_ms || 0);
+      });
+
+      const nextMessages: Message[] = orderedRecords.flatMap((record: any) => {
+        const traceTimestamps = (record.trace || []).map((evt: TraceEvent) => evt.timestamp_ms);
+        const startedAt = traceTimestamps.length ? Math.min(...traceTimestamps) : Date.now();
+        const completedAt = traceTimestamps.length ? Math.max(...traceTimestamps) : startedAt;
+
+        return [
+          {
+            id: `user-${record.session_id}`,
+            sender: 'user',
+            content: record.task_input,
+            timestamp: startedAt,
+            animateOnLoad: false,
+          },
+          {
+            id: `agent-${record.session_id}`,
+            sender: 'agent',
+            content: record.final_response || (record.pending_approval ? (lang === 'zh' ? 'Agent suspended, awaiting approval.' : 'Agent suspended, awaiting approval.') : (lang === 'zh' ? '任务已执行完成。' : 'Task completed.')),
+            status: record.status,
+            trace: record.trace || [],
+            pendingApproval: record.pending_approval,
+            budgetUsage: {
+              tokens_estimate: record.tokens_estimate,
+              tool_call_count: record.tool_call_count,
+            },
+            timestamp: completedAt,
+            animateOnLoad: false,
+            runStartedAt: startedAt,
+            runCompletedAt: completedAt,
+          },
+        ];
+      });
+
+      setMessages(nextMessages);
+      setSelectedConversationId(conversationId);
+      setSelectedSessionId(preferredSessionId || related[related.length - 1]?.session_id || null);
+    } catch (e) {
+      console.error('Failed to load conversation', e);
+    }
+  };
+
   const handleClearHistory = async () => {
     if (confirm(lang === 'zh' ? '确定要清空所有会话历史记录吗？这会清除上下文并重置智能体状态。' : 'Are you sure you want to clear all session history? This will clear context and reset the agent state.')) {
       try {
@@ -874,15 +1960,90 @@ export default function App() {
           await (window as any).forgeone.prunePending();
         }
         setMessages([]);
+        setSelectedConversationId(null);
         setSelectedSessionId(null);
         setTracesList([]);
         alert(lang === 'zh' ? '会话历史已清空！' : 'Session history cleared!');
       } catch (err) {
         console.error('Failed to clear history:', err);
         setMessages([]);
+        setSelectedConversationId(null);
         setSelectedSessionId(null);
         setTracesList([]);
       }
+    }
+  };
+
+  const moveTextareaCursorToEnd = () => {
+    window.requestAnimationFrame(() => {
+      const textarea = inputTextareaRef.current;
+      if (!textarea) return;
+      const end = textarea.value.length;
+      textarea.focus();
+      textarea.setSelectionRange(end, end);
+    });
+  };
+
+  const recallInputHistory = (direction: 'older' | 'newer') => {
+    if (!inputHistory.length) return;
+
+    if (direction === 'older') {
+      const nextIndex = inputHistoryIndex === null
+        ? inputHistory.length - 1
+        : Math.max(0, inputHistoryIndex - 1);
+
+      if (inputHistoryIndex === null) {
+        setInputDraft(inputText);
+      }
+
+      setInputHistoryIndex(nextIndex);
+      setInputText(inputHistory[nextIndex] || '');
+      moveTextareaCursorToEnd();
+      return;
+    }
+
+    if (inputHistoryIndex === null) return;
+
+    if (inputHistoryIndex >= inputHistory.length - 1) {
+      setInputHistoryIndex(null);
+      setInputText(inputDraft);
+      moveTextareaCursorToEnd();
+      return;
+    }
+
+    const nextIndex = inputHistoryIndex + 1;
+    setInputHistoryIndex(nextIndex);
+    setInputText(inputHistory[nextIndex] || '');
+    moveTextareaCursorToEnd();
+  };
+
+  const handleDeleteHistoryItem = async (conversationId: string) => {
+    const confirmed = confirm(
+      lang === 'zh'
+        ? '确定删除这条历史记录吗？该会话的 Trace 与审批状态会一并移除。'
+        : 'Delete this history entry? Its trace and pending approval state will be removed.'
+    );
+    if (!confirmed) return;
+
+    try {
+      const related = tracesList.filter(
+        item => (item.conversation_id || item.session_id) === conversationId
+      );
+      await Promise.all(
+        related.map(item => (window as any).forgeone.deleteTrace(item.session_id))
+      );
+      setTracesList(prev =>
+        prev.filter(item => (item.conversation_id || item.session_id) !== conversationId)
+      );
+
+      if (selectedConversationId === conversationId) {
+        setSelectedConversationId(null);
+        setSelectedSessionId(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Failed to delete history item', error);
+      alert(lang === 'zh' ? '删除失败，请稍后重试。' : 'Failed to delete history entry. Please try again.');
     }
   };
 
@@ -891,13 +2052,24 @@ export default function App() {
     if (!inputText.trim() || isRunning) return;
 
     const taskToSend = inputText;
+    const conversationId = selectedConversationId || nextConversationId();
+    const priorConversationHistory = serializeConversationHistory(messages);
     if (taskToSend.trim() === '/clear') {
       setInputText('');
       handleClearHistory();
       return;
     }
+
+    const trimmedTask = taskToSend.trim();
+    setInputHistory(prev => {
+      const deduped = prev.filter(item => item !== trimmedTask);
+      return [...deduped, trimmedTask].slice(-50);
+    });
+    setInputHistoryIndex(null);
+    setInputDraft('');
     setInputText('');
     setIsRunning(true);
+    setSelectedConversationId(conversationId);
 
     const userMessageId = `user-${Date.now()}`;
     const agentMessageId = `agent-${Date.now()}`;
@@ -913,10 +2085,13 @@ export default function App() {
       {
         id: agentMessageId,
         sender: 'agent',
-        content: lang === 'zh' ? 'Agent 运行时核心已启动... 正在规划任务执行路径，分析所需的工具上下文。' : 'Agent Loop started... Planning execution steps and analyzing tool contexts.',
+        content: '',
         timestamp: Date.now(),
         status: 'running',
-        trace: []
+        streaming: true,
+        trace: [],
+        animateOnLoad: true,
+        runStartedAt: Date.now(),
       }
     ]);
 
@@ -945,25 +2120,43 @@ export default function App() {
 
       const res: RunResult = await (window as any).forgeone.runTask({
         task: taskToSend,
+        conversation_id: conversationId,
+        conversation_history: priorConversationHistory,
         model_name: modelNameParam,
         api_key: apiKeyParam,
         base_url: baseUrlParam,
         max_loops: maxLoops,
         token_budget: 32000,
+        max_output_tokens: activeProfile?.maxTokens,
         allowed_tools: toolsArr,
         read_roots: [projectRoot],
         approval_read_roots: ['secrets'],
+        mcp_servers: mcpServers
+          .filter(server => server.status === 'connected')
+          .map(server => ({
+            name: server.name,
+            transport: server.transport,
+            command: server.command,
+            args: server.args,
+            env: server.env,
+            endpoint: server.endpoint,
+            headers: server.headers,
+            timeout: server.timeout,
+          })),
       });
 
+      setSelectedConversationId(conversationId);
       setSelectedSessionId(res.state.session_id);
       
       setMessages(prev => prev.map(m => m.id === agentMessageId ? {
         ...m,
         content: res.final_response || (res.state.pending_approval ? (lang === 'zh' ? 'Agent 执行由于触发高危工具已被 Policy Engine 挂起，正在等待您的安全审批。' : 'Agent loop suspended by Policy Engine, awaiting developer authorization.') : (lang === 'zh' ? '任务已顺利执行完成。' : 'Task successfully executed.')),
         status: res.state.status,
+        streaming: false,
         trace: res.trace,
         pendingApproval: res.state.pending_approval,
-        budgetUsage: res.state.budget_usage
+        budgetUsage: res.state.budget_usage,
+        runCompletedAt: Date.now(),
       } : m));
 
       loadTraces();
@@ -971,7 +2164,9 @@ export default function App() {
       setMessages(prev => prev.map(m => m.id === agentMessageId ? {
         ...m,
         content: `${lang === 'zh' ? '执行出错' : 'Error'}: ${err.message || err}`,
-        status: 'failed'
+        status: 'failed',
+        streaming: false,
+        runCompletedAt: Date.now(),
       } : m));
     } finally {
       setIsRunning(false);
@@ -983,12 +2178,16 @@ export default function App() {
     try {
       const record = await (window as any).forgeone.inspectTrace(sessionId);
       if (record) {
+        const traceTimestamps = (record.trace || []).map((evt: TraceEvent) => evt.timestamp_ms);
+        const startedAt = traceTimestamps.length ? Math.min(...traceTimestamps) : Date.now();
+        const completedAt = traceTimestamps.length ? Math.max(...traceTimestamps) : startedAt;
         setMessages([
           {
             id: `user-${record.session_id}`,
             sender: 'user',
             content: record.task_input,
-            timestamp: Date.now() - 100000
+            timestamp: startedAt,
+            animateOnLoad: false,
           },
           {
             id: `agent-${record.session_id}`,
@@ -1001,7 +2200,10 @@ export default function App() {
               tokens_estimate: record.tokens_estimate,
               tool_call_count: record.tool_call_count
             },
-            timestamp: Date.now() - 50000
+            timestamp: completedAt,
+            animateOnLoad: false,
+            runStartedAt: startedAt,
+            runCompletedAt: completedAt,
           }
         ]);
       }
@@ -1010,6 +2212,12 @@ export default function App() {
     }
   };
 
+  const handleSelectConversation = async (conversationId: string, sessionId?: string | null) => {
+    await loadConversation(conversationId, sessionId);
+  };
+
+  void handleSelectHistory;
+
   const handleApprove = async (agentMsgId: string, sessionId: string) => {
     setIsRunning(true);
     
@@ -1017,7 +2225,10 @@ export default function App() {
       ...m,
       pendingApproval: null,
       status: 'running',
-      content: lang === 'zh' ? '安全审批已批准。正在恢复 Agent 运行环境并恢复自治执行循环...' : 'Authorization granted. Restoring Agent Sandbox and resuming loop...'
+      content: lang === 'zh' ? '安全审批已批准。正在恢复 Agent 运行环境并恢复自治执行循环...' : 'Authorization granted. Restoring Agent Sandbox and resuming loop...',
+      streaming: true,
+      runStartedAt: Date.now(),
+      runCompletedAt: undefined,
     } : m));
 
     try {
@@ -1026,16 +2237,20 @@ export default function App() {
         ...m,
         content: res.final_response || (lang === 'zh' ? '任务已顺利执行完成。' : 'Task successfully executed.'),
         status: res.state.status,
+        streaming: false,
         trace: res.trace,
         pendingApproval: res.state.pending_approval,
-        budgetUsage: res.state.budget_usage
+        budgetUsage: res.state.budget_usage,
+        runCompletedAt: Date.now(),
       } : m));
       loadTraces();
     } catch (err: any) {
       setMessages(prev => prev.map(m => m.id === agentMsgId ? {
         ...m,
         content: `${lang === 'zh' ? '恢复执行审批出错' : 'Error resuming loop'}: ${err.message || err}`,
-        status: 'failed'
+        status: 'failed',
+        streaming: false,
+        runCompletedAt: Date.now(),
       } : m));
     } finally {
       setIsRunning(false);
@@ -1063,6 +2278,270 @@ export default function App() {
 
   const toggleSkill = (id: string) => {
     setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  };
+
+  const selectedMcpServer = mcpServers.find(server => server.id === selectedMcpServerId) ?? mcpServers[0] ?? null;
+  const mcpConnectedCount = mcpServers.filter(server => server.status === 'connected').length;
+  const mcpIssueCount = mcpServers.filter(server => server.status === 'error' || server.status === 'connecting').length;
+  const mcpMountedCount = mcpServers.filter(server => server.mountScope !== 'disabled').length;
+  const mcpCapabilityTotals = mcpServers.reduce(
+    (totals, server) => ({
+      tools: totals.tools + server.capabilities.tools,
+      resources: totals.resources + server.capabilities.resources,
+      prompts: totals.prompts + server.capabilities.prompts,
+    }),
+    { tools: 0, resources: 0, prompts: 0 }
+  );
+  const selectedMcpSections = selectedMcpServer
+    ? [
+        { label: 'Tools', items: selectedMcpServer.toolNames },
+        { label: 'Resources', items: selectedMcpServer.resourceNames },
+        { label: 'Prompts', items: selectedMcpServer.promptNames },
+      ]
+    : [];
+  const getMcpStatusLabel = (status: MCPServer['status']) => {
+    if (lang === 'zh') {
+      switch (status) {
+        case 'connected':
+          return '已连接';
+        case 'connecting':
+          return '连接中';
+        case 'error':
+          return '异常';
+        case 'disabled':
+        default:
+          return '已禁用';
+      }
+    }
+
+    switch (status) {
+      case 'connected':
+        return 'Connected';
+      case 'connecting':
+        return 'Connecting';
+      case 'error':
+        return 'Error';
+      case 'disabled':
+      default:
+        return 'Disabled';
+    }
+  };
+  const getMcpStatusTone = (status: MCPServer['status']) => {
+    if (status === 'connected') return 'success';
+    if (status === 'error') return 'warning';
+    return 'info';
+  };
+  const getMcpTransportLabel = (transport: MCPServer['transport']) =>
+    transport === 'streamable_http' ? 'Streamable HTTP' : 'STDIO';
+  const getMcpMountScopeLabel = (scope: MCPServer['mountScope']) => {
+    if (lang === 'zh') {
+      switch (scope) {
+        case 'global':
+          return '全局';
+        case 'workspace':
+          return '工作区';
+        case 'session':
+          return '会话';
+        case 'disabled':
+        default:
+          return '未挂载';
+      }
+    }
+
+    switch (scope) {
+      case 'global':
+        return 'Global';
+      case 'workspace':
+        return 'Workspace';
+      case 'session':
+        return 'Session';
+      case 'disabled':
+      default:
+        return 'Not Mounted';
+    }
+  };
+
+  const handleGoToCreate = () => {
+    setMcpFormMode('create');
+    setMcpFormServerId(null);
+    
+    setMcpFormName(`custom-server-${mcpServers.length + 1}`);
+    setMcpFormType('local');
+    setMcpFormCommand('');
+    setMcpFormArgs('');
+    setMcpFormEnv([{ key: '', value: '' }]);
+    setMcpFormRemoteTransport('SSE');
+    setMcpFormTimeout(30000);
+    setMcpFormUrl('');
+    setMcpFormHeaders([{ key: '', value: '' }]);
+    setMcpFormSandbox(true);
+
+    setMcpView('form');
+  };
+
+  const handleGoToEdit = (id: string) => {
+    const server = mcpServers.find(s => s.id === id);
+    if (!server) return;
+
+    setMcpFormMode('edit');
+    setMcpFormServerId(id);
+    
+    setMcpFormName(server.name);
+    setMcpFormType(server.transport === 'stdio' ? 'local' : 'remote');
+    setMcpFormCommand(server.command || '');
+    setMcpFormArgs(server.args || '');
+    setMcpFormEnv(server.env && server.env.length > 0 ? server.env : [{ key: '', value: '' }]);
+    setMcpFormRemoteTransport(server.remoteTransport || 'SSE');
+    setMcpFormTimeout(server.timeout || 30000);
+    setMcpFormUrl(server.endpoint || '');
+    setMcpFormHeaders(server.headers && server.headers.length > 0 ? server.headers : [{ key: '', value: '' }]);
+    setMcpFormSandbox(server.sandbox !== undefined ? server.sandbox : true);
+
+    setMcpView('form');
+  };
+
+  const handleSaveMcpForm = () => {
+    if (!mcpFormName.trim()) {
+      alert(lang === 'zh' ? '请输入 Server 名称' : 'Please enter server name');
+      return;
+    }
+
+    if (mcpFormType === 'local') {
+      if (!mcpFormCommand.trim()) {
+        alert(lang === 'zh' ? '请输入 Stdio 命令 (Command)' : 'Please enter Stdio Command');
+        return;
+      }
+    } else {
+      if (!mcpFormUrl.trim()) {
+        alert(lang === 'zh' ? '请输入 URL' : 'Please enter URL');
+        return;
+      }
+    }
+
+    const filteredEnv = mcpFormEnv.filter(item => item.key.trim() !== '');
+    const filteredHeaders = mcpFormHeaders.filter(item => item.key.trim() !== '');
+
+    let endpoint = '';
+    if (mcpFormType === 'local') {
+      endpoint = `${mcpFormCommand} ${mcpFormArgs}`.trim();
+    } else {
+      endpoint = mcpFormUrl;
+    }
+
+    if (mcpFormMode === 'create') {
+      const nextId = `custom-${Date.now()}`;
+      const nextServer: MCPServer = {
+        id: nextId,
+        name: mcpFormName,
+        transport: mcpFormType === 'local' ? 'stdio' : 'streamable_http',
+        endpoint: endpoint,
+        status: 'connected',
+        permission: mcpFormType === 'local' ? (mcpFormSandbox ? 'sandbox' : 'unrestricted') : 'remote HTTP API',
+        authMode: mcpFormType === 'local' ? 'env defined' : (filteredHeaders.length > 0 ? 'header key auth' : 'none'),
+        startupMode: mcpFormType === 'local' ? 'spawn on demand' : 'HTTP client',
+        mountScope: 'session',
+        mountTarget: lang === 'zh' ? '当前会话' : 'Current session',
+        policyMode: mcpFormType === 'local' && mcpFormSandbox ? 'sandboxed execution' : 'allowed',
+        capabilities: { 
+          tools: mcpFormType === 'local' ? 4 : 8, 
+          resources: mcpFormType === 'local' ? 2 : 12, 
+          prompts: 0 
+        },
+        toolNames: mcpFormType === 'local' ? ['custom_tool_1', 'custom_tool_2'] : ['fetch_api', 'query_endpoint'],
+        resourceNames: mcpFormType === 'local' ? ['file://local/config'] : ['api://remote/endpoint'],
+        promptNames: [],
+        description: mcpFormType === 'local' 
+          ? `本地启动命令: ${mcpFormCommand}`
+          : `远程 SSE/WS 服务器: ${mcpFormUrl}`,
+        lastHandshake: new Date().toLocaleString(),
+        lastTrace: lang === 'zh' ? '初始化并发现能力' : 'Initialized and discovered capabilities',
+        command: mcpFormCommand,
+        args: mcpFormArgs,
+        env: filteredEnv,
+        remoteTransport: mcpFormRemoteTransport,
+        timeout: mcpFormTimeout,
+        headers: filteredHeaders,
+        sandbox: mcpFormSandbox,
+      };
+
+      setMcpServers(prev => [nextServer, ...prev]);
+      setSelectedMcpServerId(nextId);
+    } else {
+      setMcpServers(prev => prev.map(server => {
+        if (server.id !== mcpFormServerId) return server;
+        return {
+          ...server,
+          name: mcpFormName,
+          transport: mcpFormType === 'local' ? 'stdio' : 'streamable_http',
+          endpoint: endpoint,
+          permission: mcpFormType === 'local' ? (mcpFormSandbox ? 'sandbox' : 'unrestricted') : 'remote HTTP API',
+          authMode: mcpFormType === 'local' ? 'env defined' : (filteredHeaders.length > 0 ? 'header key auth' : 'none'),
+          description: mcpFormType === 'local' 
+            ? `本地启动命令: ${mcpFormCommand}`
+            : `远程 SSE/WS 服务器: ${mcpFormUrl}`,
+          command: mcpFormCommand,
+          args: mcpFormArgs,
+          env: filteredEnv,
+          remoteTransport: mcpFormRemoteTransport,
+          timeout: mcpFormTimeout,
+          headers: filteredHeaders,
+          sandbox: mcpFormSandbox,
+          status: server.status === 'disabled' ? 'connected' : server.status,
+        };
+      }));
+    }
+
+    setMcpView('list');
+  };
+
+  const handleCancelMcpForm = () => {
+    setMcpView('list');
+  };
+
+  const handleToggleMcpServer = (id: string) => {
+    setMcpServers(prev => prev.map(server => {
+      if (server.id !== id) return server;
+      const nextStatus = server.status === 'connected' ? 'disabled' : 'connected';
+      return {
+        ...server,
+        status: nextStatus,
+        mountScope: nextStatus === 'connected' && server.mountScope === 'disabled' ? 'session' : server.mountScope,
+        mountTarget: nextStatus === 'connected' && server.mountScope === 'disabled'
+          ? (lang === 'zh' ? '当前会话' : 'Current session')
+          : nextStatus === 'disabled'
+            ? (lang === 'zh' ? '未挂载' : 'Not mounted')
+            : server.mountTarget,
+        lastHandshake: nextStatus === 'connected'
+          ? new Date().toLocaleString()
+          : server.lastHandshake,
+        lastError: nextStatus === 'connected' ? undefined : server.lastError,
+        lastTrace: nextStatus === 'connected'
+          ? (lang === 'zh' ? '手动启动后完成 initialize 与 capability discovery' : 'Initialized and discovered capabilities after manual start')
+          : server.lastTrace,
+      };
+    }));
+  };
+
+  const handleReconnectMcpServer = (id: string) => {
+    setMcpServers(prev => prev.map(server => {
+      if (server.id !== id) return server;
+      return {
+        ...server,
+        status: 'connected',
+        mountScope: server.mountScope === 'disabled' ? 'session' : server.mountScope,
+        mountTarget: server.mountScope === 'disabled' ? (lang === 'zh' ? '当前会话' : 'Current session') : server.mountTarget,
+        lastHandshake: new Date().toLocaleString(),
+        lastError: undefined,
+        lastTrace: lang === 'zh' ? '重连后恢复并重新发现能力' : 'Recovered after reconnect and capability discovery',
+      };
+    }));
+  };
+  const handleRemoveMcpServer = (id: string) => {
+    const remaining = mcpServers.filter(server => server.id !== id);
+    setMcpServers(remaining);
+    if (selectedMcpServerId === id) {
+      setSelectedMcpServerId(remaining[0]?.id ?? '');
+    }
   };
 
   const handleTestConnection = async (id: string) => {
@@ -1128,7 +2607,7 @@ export default function App() {
       }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8秒超时
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // 45秒超时（本地大模型冷启动需要较长时间）
 
       const response = await fetch(url, {
         method,
@@ -1152,11 +2631,14 @@ export default function App() {
           [id]: { status: 'failed' } 
         }));
       }
-    } catch (error) {
-      console.error('Connection test failed:', error);
+    } catch (error: any) {
+      const errMsg = error?.name === 'AbortError'
+        ? '连接超时（>45s），Ollama 模型可能正在冷启动，请稍后重试'
+        : (error?.message || String(error));
+      console.error('Connection test failed:', errMsg);
       setConnectionStatus(prev => ({ 
         ...prev, 
-        [id]: { status: 'failed' } 
+        [id]: { status: 'failed', error: errMsg } 
       }));
     }
   };
@@ -1334,7 +2816,7 @@ export default function App() {
     <div className="app-container">
       {/* 侧边栏导航 */}
       <aside className="sidebar">
-        <div className="sidebar-header">
+        <div className="sidebar-header drag-region">
           <div className="logo-container">
             <div className="logo-icon">F1</div>
             <div>
@@ -1350,6 +2832,7 @@ export default function App() {
             onClick={() => {
               setActiveTab('chat');
               setMessages([]);
+              setSelectedConversationId(null);
               setSelectedSessionId(null);
             }}
           >
@@ -1433,13 +2916,19 @@ export default function App() {
 
       {/* 主内容区域 */}
       <main className="main-content">
-        {/* Top App Bar (通用搜索栏和状态) */}
-        <header className="top-app-bar">
-          <div className="top-bar-search">
-            <Icon name="search" className="search-icon" />
-            <input type="text" placeholder={t.searchPlaceholder} />
+        {/* 自定义窗口头部 */}
+        <header className="window-titlebar drag-region">
+          <div className="top-app-bar">
+            <div className="titlebar-runtime-badge">
+              <span className="titlebar-runtime-dot" />
+              <span>Desktop Harness</span>
+            </div>
+            <div className="top-bar-search no-drag">
+              <Icon name="search" className="search-icon" />
+              <input type="text" placeholder={t.searchPlaceholder} />
+            </div>
           </div>
-          <div className="top-bar-actions">
+          <div className="top-bar-actions no-drag">
             <button 
               className="top-btn" 
               title={theme === 'dark' ? (lang === 'zh' ? '切换为亮色模式' : 'Switch to Light Mode') : (lang === 'zh' ? '切换为暗色模式' : 'Switch to Dark Mode')}
@@ -1457,6 +2946,29 @@ export default function App() {
               <Icon name="account_circle" />
             </button>
           </div>
+          <div className="window-controls no-drag">
+            <button
+              className="window-control-btn"
+              title={lang === 'zh' ? '最小化' : 'Minimize'}
+              onClick={() => forgeoneDesktop?.minimizeWindow?.()}
+            >
+              <Icon name="minimize" />
+            </button>
+            <button
+              className="window-control-btn"
+              title={windowState.isMaximized ? (lang === 'zh' ? '还原' : 'Restore') : (lang === 'zh' ? '最大化' : 'Maximize')}
+              onClick={() => forgeoneDesktop?.toggleMaximizeWindow?.()}
+            >
+              <Icon name={windowState.isMaximized ? 'restore' : 'maximize'} />
+            </button>
+            <button
+              className="window-control-btn close"
+              title={lang === 'zh' ? '关闭' : 'Close'}
+              onClick={() => forgeoneDesktop?.closeWindow?.()}
+            >
+              <Icon name="close" />
+            </button>
+          </div>
         </header>
 
         {/* 聊天面板（多栏交互布局） */}
@@ -1465,32 +2977,44 @@ export default function App() {
             {/* 二级历史会话边栏 */}
             <div className="chat-history-sidebar">
               <div className="chat-history-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                <span>{t.traceListCard}</span>
+                <span>{t.historyListTitle}</span>
                 <button 
                   className="top-btn" 
-                  title={lang === 'zh' ? '清空历史记录 (/clear)' : 'Clear History (/clear)'}
-                  style={{ padding: '4px', display: 'inline-flex', borderRadius: '4px', color: 'var(--error-color)', cursor: 'pointer' }}
+                  title={`${t.historyClearTitle} (/clear)`}
+                  style={{ padding: '4px', display: 'inline-flex', borderRadius: '4px', color: 'var(--error)', cursor: 'pointer' }}
                   onClick={handleClearHistory}
                 >
-                  <Icon name="delete_sweep" style={{ fontSize: '16px' }} />
+                  <Icon name="delete" style={{ fontSize: '16px' }} />
                 </button>
               </div>
               <div className="chat-history-list custom-scrollbar">
-                {tracesList.length === 0 ? (
+                {conversationSummaries.length === 0 ? (
                   <div style={{ padding: '16px', textAlign: 'center', color: 'var(--on-surface-variant)', fontSize: '12px' }}>
                     {t.traceEmptyList}
                   </div>
                 ) : (
-                  tracesList.map((item) => (
+                  conversationSummaries.map((item) => (
                     <div
-                      key={item.session_id}
-                      className={`chat-history-item ${selectedSessionId === item.session_id ? 'active' : ''}`}
-                      onClick={() => handleSelectHistory(item.session_id)}
+                      key={item.conversation_id}
+                      className={`chat-history-item ${selectedConversationId === item.conversation_id ? 'active' : ''}`}
+                      onClick={() => handleSelectConversation(item.conversation_id, item.latestSessionId)}
                     >
-                      <span className="task-title">{item.task_input}</span>
+                      <div className="chat-history-item-top">
+                        <span className="task-title">{item.title}</span>
+                        <button
+                          className="chat-history-delete-btn"
+                          title={t.historyDeleteTitle}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteHistoryItem(item.conversation_id);
+                          }}
+                        >
+                          <Icon name="delete" style={{ fontSize: '14px' }} />
+                        </button>
+                      </div>
                       <div className="task-meta">
-                        <span style={{ fontFamily: 'var(--font-mono)' }}>{item.session_id.substring(0, 8)}</span>
-                        <span style={{ color: item.status === 'completed' ? 'var(--success)' : 'var(--warning)' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)' }}>{item.turnCount} turns</span>
+                        <span style={{ color: item.latestStatus === 'completed' ? 'var(--success)' : 'var(--warning)' }}>
                           {item.status === 'completed' ? (lang === 'zh' ? '已完成' : 'Done') : (lang === 'zh' ? '挂起中' : 'Pending')}
                         </span>
                       </div>
@@ -1538,7 +3062,15 @@ export default function App() {
                           </div>
 
                           <div className="message-bubble-body">
-                            <div className="message-text">{msg.content}</div>
+                            {/* 消息内容渲染：支持 <think> 折叠块 + 流式光标 */}
+                            <MessageContent msg={msg} lang={lang} />
+
+                            <MessageRuntimeMeta
+                              msg={msg}
+                              nowMs={runtimeNowMs}
+                              lang={lang}
+                              t={t}
+                            />
 
                             {/* 嵌在 Agent 回答内部的流式 Trace 执行日志 */}
                             {msg.sender === 'agent' && msg.trace && msg.trace.length > 0 && (
@@ -1680,12 +3212,71 @@ export default function App() {
                   })()}
 
                   <form onSubmit={handleSend} className="chat-input-box-container">
+                    <div className="conversation-context-bar">
+                      <div className="conversation-context-bar-title">{t.contextBarTitle}</div>
+                      {currentConversationSummary ? (
+                        <div className="conversation-context-bar-items">
+                          <span className="conversation-context-chip">
+                            {t.contextBarUsage}: {formatTokenCount(currentContextTokens)}/{formatTokenCount(activeContextWindow)} ({currentContextRatio.toFixed(currentContextRatio >= 10 ? 0 : 1)}%)
+                          </span>
+                          <span className="conversation-context-chip">
+                            {t.contextBarTurns}: {currentConversationSummary.turnCount}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="conversation-context-bar-empty">{t.contextBarNoContext}</div>
+                      )}
+                    </div>
                     <textarea
+                      ref={inputTextareaRef}
                       className="chat-input-textarea"
                       placeholder={t.inputPlaceholder}
                       value={inputText}
-                      onChange={(e) => setInputText(e.target.value)}
+                      onChange={(e) => {
+                        const nextValue = e.target.value;
+                        setInputText(nextValue);
+                        if (inputHistoryIndex !== null) {
+                          setInputHistoryIndex(null);
+                        }
+                        setInputDraft(nextValue);
+                      }}
                       onKeyDown={(e) => {
+                        if (
+                          e.key === 'ArrowUp' &&
+                          !e.shiftKey &&
+                          !e.altKey &&
+                          !e.ctrlKey &&
+                          !e.metaKey
+                        ) {
+                          const textarea = e.currentTarget;
+                          const caret = textarea.selectionStart;
+                          const selectionCollapsed = textarea.selectionStart === textarea.selectionEnd;
+                          const atFirstLine = !textarea.value.slice(0, caret).includes('\n');
+                          if (selectionCollapsed && atFirstLine) {
+                            e.preventDefault();
+                            recallInputHistory('older');
+                            return;
+                          }
+                        }
+
+                        if (
+                          e.key === 'ArrowDown' &&
+                          !e.shiftKey &&
+                          !e.altKey &&
+                          !e.ctrlKey &&
+                          !e.metaKey
+                        ) {
+                          const textarea = e.currentTarget;
+                          const caret = textarea.selectionEnd;
+                          const selectionCollapsed = textarea.selectionStart === textarea.selectionEnd;
+                          const atLastLine = !textarea.value.slice(caret).includes('\n');
+                          if (selectionCollapsed && atLastLine && inputHistoryIndex !== null) {
+                            e.preventDefault();
+                            recallInputHistory('newer');
+                            return;
+                          }
+                        }
+
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
                           handleSend(e);
@@ -1809,6 +3400,7 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
             </div>
           </div>
         )}
@@ -2048,8 +3640,9 @@ export default function App() {
                                 </span>
                               )}
                               {conn?.status === 'failed' && (
-                                <span className="status-pill danger" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', padding: '4px 8px' }} title={lang === 'zh' ? '连接失败' : 'Failed'}>
+                                <span className="status-pill danger" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', padding: '4px 8px', cursor: 'help', maxWidth: '220px' }} title={conn.error || (lang === 'zh' ? '连接失败' : 'Failed')}>
                                   ✗ {lang === 'zh' ? '失败' : 'Failed'}
+                                  {conn.error && <span style={{ fontSize: '10px', opacity: 0.8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }}>: {conn.error}</span>}
                                 </span>
                               )}
 
@@ -2272,12 +3865,7 @@ export default function App() {
                                       style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
                                       onClick={() => {
                                         setFormModelId(m);
-                                        const lower = m.toLowerCase();
-                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large')) {
-                                          setFormMaxTokens(4096);
-                                        } else {
-                                          setFormMaxTokens(2048);
-                                        }
+                                        setFormMaxTokens(inferSuggestedOutputTokens(m));
                                       }}
                                     >
                                       {m}
@@ -2303,12 +3891,7 @@ export default function App() {
                                     style={{ cursor: 'pointer', margin: 0, border: formModelId === lbl ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === lbl ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
                                     onClick={() => {
                                       setFormModelId(lbl);
-                                      const lower = lbl.toLowerCase();
-                                      if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large')) {
-                                        setFormMaxTokens(4096);
-                                      } else {
-                                        setFormMaxTokens(2048);
-                                      }
+                                      setFormMaxTokens(inferSuggestedOutputTokens(lbl));
                                     }}
                                   >
                                     {lbl}
@@ -2406,12 +3989,7 @@ export default function App() {
                                       style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
                                       onClick={() => {
                                         setFormModelId(m);
-                                        const lower = m.toLowerCase();
-                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b') || lower.includes('70b')) {
-                                          setFormMaxTokens(4096);
-                                        } else {
-                                          setFormMaxTokens(2048);
-                                        }
+                                        setFormMaxTokens(inferSuggestedOutputTokens(m));
                                       }}
                                     >
                                       {m}
@@ -2437,12 +4015,7 @@ export default function App() {
                                     style={{ cursor: 'pointer', margin: 0, border: formModelId === lbl ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === lbl ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
                                     onClick={() => {
                                       setFormModelId(lbl);
-                                      const lower = lbl.toLowerCase();
-                                      if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b')) {
-                                        setFormMaxTokens(4096);
-                                      } else {
-                                        setFormMaxTokens(2048);
-                                      }
+                                      setFormMaxTokens(inferSuggestedOutputTokens(lbl));
                                     }}
                                   >
                                     {lbl}
@@ -2539,12 +4112,7 @@ export default function App() {
                                       style={{ cursor: 'pointer', margin: 0, border: formModelId === m ? '1px solid var(--accent-color)' : '1px solid var(--border-color)', backgroundColor: formModelId === m ? 'rgba(99, 102, 241, 0.1)' : 'transparent' }}
                                       onClick={() => {
                                         setFormModelId(m);
-                                        const lower = m.toLowerCase();
-                                        if (lower.includes('gpt-4') || lower.includes('claude-3') || lower.includes('pro') || lower.includes('large') || lower.includes('14b') || lower.includes('32b')) {
-                                          setFormMaxTokens(4096);
-                                        } else {
-                                          setFormMaxTokens(2048);
-                                        }
+                                        setFormMaxTokens(inferSuggestedOutputTokens(m));
                                       }}
                                     >
                                       {m}
@@ -2608,13 +4176,18 @@ export default function App() {
                       </div>
 
                       <div className="form-group">
-                        <label className="form-label">{t.modelMaxTokensLabel}</label>
+                        <label className="form-label">{lang === 'zh' ? '单次最大输出 TOKEN 数 (MAX OUTPUT TOKENS)' : 'Max Output Tokens'}</label>
                         <input 
                           type="number" 
                           className="form-input-text" 
                           value={formMaxTokens}
-                          onChange={(e) => setFormMaxTokens(parseInt(e.target.value) || 2048)}
+                          onChange={(e) => setFormMaxTokens(parseInt(e.target.value) || 4096)}
                         />
+                        <div className="form-helper-text">
+                          {lang === 'zh'
+                            ? `这个字段限制单次回复的输出长度，不是上下文窗口。当前 Runtime 推断上下文窗口约为 ${formatTokenCount(inferredContextWindow)} tokens。`
+                            : `This field caps a single response output, not the model context window. Runtime currently infers about ${formatTokenCount(inferredContextWindow)} tokens of context.`}
+                        </div>
                       </div>
 
                       <div className="switch-row" style={{ marginTop: '8px' }}>
@@ -2707,9 +4280,14 @@ export default function App() {
                             <div style={{ fontWeight: 600, marginTop: '2px' }}>{profile.topP}</div>
                           </div>
                           <div style={{ backgroundColor: 'var(--surface-low)', padding: '6px', borderRadius: '4px' }}>
-                            <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>Max Tokens</div>
+                            <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>{lang === 'zh' ? '输出上限' : 'Output Cap'}</div>
                             <div style={{ fontWeight: 600, marginTop: '2px' }}>{profile.maxTokens}</div>
                           </div>
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)' }}>
+                          {lang === 'zh'
+                            ? `当前 Runtime 推断上下文窗口约为 ${formatTokenCount(inferRuntimeContextWindow(profile.modelId, profile.protocol))} tokens。上方 Max Tokens 为单次输出上限。`
+                            : `Runtime currently infers about ${formatTokenCount(inferRuntimeContextWindow(profile.modelId, profile.protocol))} tokens of context. Max Tokens above is the single-response output cap.`}
                         </div>
                       </div>
 
@@ -2728,7 +4306,7 @@ export default function App() {
         )}
 
         {/* MCP 面板 */}
-        {activeTab === 'mcp' && (
+        {activeTab === 'mcp' && mcpView === 'list' && (
           <div className="canvas">
             <div className="canvas-container">
               <div className="page-header">
@@ -2736,72 +4314,119 @@ export default function App() {
                   <h2 className="page-header-title">{t.mcpTitle}</h2>
                   <p className="page-header-subtitle">{t.mcpSub}</p>
                 </div>
-                <button className="btn-primary" onClick={() => alert(lang === 'zh' ? '添加新数据源' : 'Add Source...')}>
+                <button className="btn-primary" onClick={handleGoToCreate}>
                   <Icon name="add_link" />
                   {t.mcpAddBtn}
                 </button>
               </div>
 
-              {/* 看板 */}
-              <div className="grid-bento mb-xl" style={{ marginBottom: '32px' }}>
-                <div className="stat-box">
-                  <div className="stat-header">
-                    <span className="stat-label">{t.mcpActiveConn}</span>
-                    <Icon name="cable" className="stat-icon" />
+              {/* Bento Dashboard Grid */}
+              <div className="mcp-stats-grid">
+                <div className="mcp-stat-card">
+                  <span className="mcp-stat-label">{t.mcpActiveConn}</span>
+                  <Icon name="cable" className="stat-icon" />
+                  <div className="mcp-stat-value">
+                    {mcpConnectedCount} <span className="stat-total">/ {mcpServers.length}</span>
                   </div>
-                  <div className="stat-value">{mcpSources.filter(s => s.status === 'connected').length} / {mcpSources.length}</div>
-                  <div className="stat-meta">{t.mcpActiveDesc}</div>
+                  <div className="mcp-stat-meta">{t.mcpActiveDesc}</div>
                 </div>
 
-                <div className="stat-box">
-                  <div className="stat-header">
-                    <span className="stat-label">{t.mcpThroughput}</span>
-                    <Icon name="swap_vert" className="stat-icon" />
-                  </div>
-                  <div className="stat-value">4.2 GB</div>
-                  <div className="stat-meta">{t.mcpThroughputDesc}</div>
+                <div className="mcp-stat-card">
+                  <span className="mcp-stat-label">{lang === 'zh' ? '已挂载到 Runtime' : 'Mounted Into Runtime'}</span>
+                  <Icon name="link" className="stat-icon" />
+                  <div className="mcp-stat-value">{mcpMountedCount}</div>
+                  <div className="mcp-stat-meta">{lang === 'zh' ? '当前被 Runtime 注入的 Server 数量' : 'Servers currently mounted into the runtime'}</div>
                 </div>
 
-                <div className="stat-box">
-                  <div className="stat-header">
-                    <span className="stat-label">{t.mcpHealth}</span>
-                    <Icon name="check_circle" className="stat-icon" style={{ color: 'var(--success)' }} />
-                  </div>
-                  <div className="stat-value" style={{ color: 'var(--success)' }}>98.5%</div>
-                  <div className="stat-meta">{t.mcpHealthDesc}</div>
+                <div className="mcp-stat-card">
+                  <span className="mcp-stat-label">{t.mcpThroughput}</span>
+                  <Icon name="extension" className="stat-icon" />
+                  <div className="mcp-stat-value">{mcpCapabilityTotals.tools + mcpCapabilityTotals.resources + mcpCapabilityTotals.prompts}</div>
+                  <div className="mcp-stat-meta">{mcpCapabilityTotals.tools} tools / {mcpCapabilityTotals.resources} resources / {mcpCapabilityTotals.prompts} prompts</div>
+                </div>
+
+                <div className="mcp-stat-card">
+                  <span className="mcp-stat-label">{t.mcpHealth}</span>
+                  <Icon name={mcpIssueCount > 0 ? 'warning' : 'cloud_done'} className="stat-icon" style={{ color: mcpIssueCount > 0 ? 'var(--warning-text)' : 'var(--success)' }} />
+                  <div className="mcp-stat-value" style={{ color: mcpIssueCount > 0 ? 'var(--warning-text)' : 'var(--success)' }}>{mcpIssueCount}</div>
+                  <div className="mcp-stat-meta">{t.mcpHealthDesc}</div>
                 </div>
               </div>
 
-              {/* 数据源列表 */}
-              <div className="card-bento">
-                <div className="card-title-row">
-                  <Icon name="database" className="card-title-icon" style={{ marginRight: '6px' }} />
-                  <span className="card-title-text">{t.mcpSourceCardTitle}</span>
+              {mcpServers.length === 0 ? (
+                <div className="card-bento mcp-empty-text" style={{ padding: '24px' }}>
+                  {lang === 'zh' ? '当前还没有 MCP Server。点击右上角添加一个新的 Server。' : 'No MCP servers yet. Add a new server from the top-right action.'}
                 </div>
-
-                <div className="list-rows-container">
-                  {mcpSources.map(source => (
-                    <div key={source.id} className="list-row-item">
-                      <div className="list-row-item-left">
-                        <Icon 
-                          name={source.type.includes('Database') ? 'database' : source.type.includes('Vector') ? 'description' : 'api'} 
-                          className="list-row-icon" 
+              ) : (
+                <div className="mcp-server-list-container">
+                  <div className="mcp-server-list-header">
+                    <span className="mcp-server-list-header-title">{t.mcpSourceCardTitle}</span>
+                  </div>
+                  {mcpServers.map(server => (
+                    <div
+                      key={server.id}
+                      className={`mcp-server-list-row ${selectedMcpServerId === server.id ? 'selected' : ''}`}
+                      style={{ borderLeft: selectedMcpServerId === server.id ? '4px solid var(--accent-color)' : 'none', cursor: 'pointer' }}
+                      onClick={() => setSelectedMcpServerId(server.id)}
+                    >
+                      <div className="mcp-server-list-row-left">
+                        <Icon
+                          name={server.transport === 'stdio' ? 'terminal' : server.capabilities.resources > server.capabilities.tools ? 'description' : 'api'}
+                          className="mcp-server-list-row-icon"
                         />
                         <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <span className="list-row-title">{source.name}</span>
-                            <span className={`status-pill ${source.status === 'connected' ? 'success' : source.status === 'degraded' ? 'warning' : 'info'}`}>
-                              {source.status === 'connected' ? (lang === 'zh' ? '已就绪' : 'Connected') : source.status === 'degraded' ? (lang === 'zh' ? '高延迟' : 'Degraded') : (lang === 'zh' ? '已暂停' : 'Paused')}
+                          <div className="mcp-server-title-bar">
+                            <span className="mcp-server-title-text">{server.name}</span>
+                            <span className={`status-pill ${getMcpStatusTone(server.status)}`}>
+                              {getMcpStatusLabel(server.status)}
                             </span>
                           </div>
-                          <span className="list-row-subtitle">{source.uri} • {lang === 'zh' ? '协议' : 'Type'}：{source.type} • {lang === 'zh' ? '权限' : 'Perms'}：{source.permission}</span>
+                          <p className="mcp-server-desc-text">{server.description}</p>
+                          <div className="mcp-server-row-meta-strip">
+                            <span className="mcp-server-meta-chip">{getMcpTransportLabel(server.transport)}</span>
+                            <span className="mcp-server-meta-chip">{getMcpMountScopeLabel(server.mountScope)}</span>
+                            <span className="mcp-server-meta-chip">{server.permission}</span>
+                            <span className="mcp-server-meta-chip">{server.startupMode}</span>
+                          </div>
                         </div>
                       </div>
-                      <div className="list-row-actions">
-                        <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '12px' }} onClick={() => alert(lang === 'zh' ? '打开配置' : 'Configuring...')}>{t.mcpConfigureBtn}</button>
-                        <button 
-                          className="row-action-btn btn-delete" 
-                          onClick={() => setMcpSources(prev => prev.filter(s => s.id !== source.id))}
+                      
+                      <div className="mcp-server-row-actions-right">
+                        <button
+                          className="row-action-btn"
+                          style={{ padding: '6px', marginRight: '4px' }}
+                          title={lang === 'zh' ? '详情' : 'Details'}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedMcpServerId(server.id);
+                          }}
+                        >
+                          <Icon name="visibility" style={{ fontSize: '18px' }} />
+                        </button>
+                        <button
+                          className="btn-secondary"
+                          style={{ padding: '6px 12px', fontSize: '12px' }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleGoToEdit(server.id);
+                          }}
+                        >
+                          {lang === 'zh' ? '编辑' : 'Edit'}
+                        </button>
+                        <label className="mcp-custom-switch" onClick={(e) => e.stopPropagation()}>
+                          <input 
+                            type="checkbox" 
+                            checked={server.status === 'connected'} 
+                            onChange={() => handleToggleMcpServer(server.id)}
+                          />
+                          <span className="mcp-custom-switch-slider"></span>
+                        </label>
+                        <button
+                          className="row-action-btn btn-delete"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleRemoveMcpServer(server.id);
+                          }}
                         >
                           <Icon name="delete" style={{ fontSize: '18px' }} />
                         </button>
@@ -2809,12 +4434,447 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-              </div>
+              )}
             </div>
+
+            {/* MCP 详情弹窗 */}
+            {selectedMcpServerId !== '' && (() => {
+              const server = mcpServers.find(s => s.id === selectedMcpServerId);
+              if (!server) return null;
+              
+              return (
+                <div className="modal-overlay" onClick={() => setSelectedMcpServerId('')}>
+                  <div className="modal-card" style={{ maxWidth: '680px', width: '90%' }} onClick={(e) => e.stopPropagation()}>
+                    <div className="modal-header">
+                      <span className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Icon name="settings" />
+                        <span>{lang === 'zh' ? 'Server 详情' : 'Server Details'}: {server.name}</span>
+                      </span>
+                      <button className="modal-close-btn" onClick={() => setSelectedMcpServerId('')}>
+                        <Icon name="close" />
+                      </button>
+                    </div>
+                    <div className="modal-body custom-scrollbar" style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxHeight: '70vh' }}>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span className={`status-pill ${getMcpStatusTone(server.status)}`}>
+                          {getMcpStatusLabel(server.status)}
+                        </span>
+                        <span className="mcp-server-meta-chip">{getMcpTransportLabel(server.transport)}</span>
+                        <span className="mcp-server-meta-chip">{getMcpMountScopeLabel(server.mountScope)}</span>
+                        <span className="mcp-server-meta-chip">{server.authMode}</span>
+                      </div>
+
+                      <div className="mcp-detail-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '传输方式' : 'Transport'}</span>
+                          <strong>{getMcpTransportLabel(server.transport)}</strong>
+                        </div>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '连接端点' : 'Endpoint'}</span>
+                          <strong style={{ wordBreak: 'break-all' }}>{server.endpoint}</strong>
+                        </div>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '鉴权模式' : 'Auth Mode'}</span>
+                          <strong>{server.authMode}</strong>
+                        </div>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '启动策略' : 'Startup Mode'}</span>
+                          <strong>{server.startupMode}</strong>
+                        </div>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '权限策略' : 'Permission'}</span>
+                          <strong>{server.permission}</strong>
+                        </div>
+                        <div className="mcp-detail-item">
+                          <span className="mcp-detail-label">{lang === 'zh' ? '挂载范围' : 'Mount Scope'}</span>
+                          <strong>{getMcpMountScopeLabel(server.mountScope)}</strong>
+                        </div>
+                        <div className="mcp-detail-item" style={{ gridColumn: 'span 2' }}>
+                          <span className="mcp-detail-label">{lang === 'zh' ? '挂载目标' : 'Mount Target'}</span>
+                          <strong>{server.mountTarget}</strong>
+                        </div>
+                      </div>
+
+                      <div className="info-banner" style={{ marginTop: '8px' }}>
+                        <Icon name="info" className="card-title-icon" />
+                        <div>
+                          <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                            {lang === 'zh' ? '这个 Server 如何接入 Runtime' : 'How this server is mounted into the runtime'}
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--on-surface-variant)' }}>{server.description}</div>
+                          {server.lastError ? (
+                            <div className="mcp-error-box">
+                              <strong>{lang === 'zh' ? '最近错误' : 'Latest Error'}:</strong> {server.lastError}
+                            </div>
+                          ) : (
+                            <div className="mcp-success-box">
+                              {lang === 'zh' ? '最近一次 initialize 与 capability discovery 已完成。' : 'Latest initialize and capability discovery completed successfully.'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid-bento" style={{ marginTop: '8px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+                        <div className="card-bento" style={{ padding: '16px' }}>
+                          <div className="card-title-row" style={{ marginBottom: '12px', paddingBottom: '8px' }}>
+                            <Icon name="extension" className="card-title-icon" style={{ marginRight: '6px', fontSize: '18px' }} />
+                            <span className="card-title-text" style={{ fontSize: '14px' }}>Capabilities</span>
+                          </div>
+                          <div className="mcp-capability-strip" style={{ marginBottom: '14px' }}>
+                            <span className="mcp-capability-pill" style={{ fontSize: '11px', padding: '2px 8px' }}>Tools {server.capabilities.tools}</span>
+                            <span className="mcp-capability-pill" style={{ fontSize: '11px', padding: '2px 8px' }}>Resources {server.capabilities.resources}</span>
+                            <span className="mcp-capability-pill" style={{ fontSize: '11px', padding: '2px 8px' }}>Prompts {server.capabilities.prompts}</span>
+                          </div>
+                          <div className="mcp-capability-groups">
+                            {selectedMcpSections.map(section => (
+                              <div key={section.label} className="mcp-capability-group">
+                                <div className="mcp-capability-group-title" style={{ fontSize: '11px' }}>{section.label}</div>
+                                {section.items.length > 0 ? (
+                                  <div className="mcp-capability-list">
+                                    {section.items.map(item => (
+                                      <span key={item} className="mcp-server-meta-chip" style={{ fontSize: '9px', padding: '1px 6px' }}>{item}</span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="mcp-empty-text" style={{ fontSize: '11px' }}>{lang === 'zh' ? '未暴露此类能力' : 'No capabilities exposed'}</div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="card-bento" style={{ padding: '16px' }}>
+                          <div className="card-title-row" style={{ marginBottom: '12px', paddingBottom: '8px' }}>
+                            <Icon name="analytics" className="card-title-icon" style={{ marginRight: '6px', fontSize: '18px' }} />
+                            <span className="card-title-text" style={{ fontSize: '14px' }}>Lifecycle / Trace</span>
+                          </div>
+                          <div className="mcp-health-stack">
+                            <div className="mcp-health-line">
+                              <strong>{lang === 'zh' ? '最近握手' : 'Last Handshake'}:</strong> {server.lastHandshake}
+                            </div>
+                            <div className="mcp-health-line">
+                              <strong>{lang === 'zh' ? '最近 Trace' : 'Last Trace'}:</strong> {server.lastTrace}
+                            </div>
+                            <div className="mcp-health-line">
+                              <strong>{lang === 'zh' ? '挂载目标' : 'Mount Target'}:</strong> {server.mountTarget}
+                            </div>
+                            <div className="mcp-health-line">
+                              <strong>{lang === 'zh' ? '当前状态' : 'Current Status'}:</strong> {getMcpStatusLabel(server.status)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="modal-footer">
+                      <button className="btn-secondary" onClick={() => handleReconnectMcpServer(server.id)}>
+                        {lang === 'zh' ? '重新连接' : 'Reconnect'}
+                      </button>
+                      <button className="btn-secondary" onClick={() => handleToggleMcpServer(server.id)}>
+                        {server.status === 'connected'
+                          ? (lang === 'zh' ? '禁用 Server' : 'Disable Server')
+                          : (lang === 'zh' ? '启动 Server' : 'Start Server')}
+                      </button>
+                      <button className="btn-primary" onClick={() => setSelectedMcpServerId('')}>
+                        {lang === 'zh' ? '确定' : 'OK'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
+        {activeTab === 'mcp' && mcpView === 'form' && (
+          <div className="canvas">
+            <div className="canvas-container" style={{ paddingBottom: '100px' }}>
+              <div className="mb-md" style={{ marginBottom: '16px' }}>
+                <button 
+                  className="btn-secondary" 
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px' }}
+                  onClick={handleCancelMcpForm}
+                >
+                  <Icon name="arrow_back" />
+                  <span>{lang === 'zh' ? '返回服务列表' : 'Back to Server List'}</span>
+                </button>
+              </div>
 
-        {/* 技能面板 */}
+              <div className="page-header" style={{ marginBottom: '24px' }}>
+                <div>
+                  <h2 className="page-header-title">
+                    {mcpFormMode === 'create' 
+                      ? (lang === 'zh' ? '创建 MCP 配置' : 'Create MCP Configuration') 
+                      : (lang === 'zh' ? '编辑 MCP 配置' : 'Edit MCP Configuration')}
+                  </h2>
+                  <p className="page-header-subtitle">
+                    {lang === 'zh' 
+                      ? '定义 Model Context Protocol 服务参数，连接您的 LLM 环境与外部能力。' 
+                      : 'Define Model Context Protocol server parameters to hook up external capabilities.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                <div className="card-bento" style={{ padding: '20px' }}>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">{lang === 'zh' ? 'Server 名称 *' : 'Server Name *'}</label>
+                    <input 
+                      type="text" 
+                      className="form-input-text" 
+                      placeholder="e.g. filesystem-server" 
+                      value={mcpFormName} 
+                      onChange={(e) => setMcpFormName(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="p-1 bg-surface-container rounded-lg inline-flex w-full md:w-auto" style={{ padding: '4px', backgroundColor: 'var(--surface-container)', borderRadius: '8px', display: 'flex', gap: '4px', alignSelf: 'flex-start' }}>
+                  <button 
+                    className={`px-8 py-2 rounded-md transition-all ${mcpFormType === 'local' ? 'tab-active bg-white text-primary shadow-sm font-semibold' : 'text-on-surface-variant hover:text-primary'}`} 
+                    onClick={() => setMcpFormType('local')}
+                    style={{ border: 'none', cursor: 'pointer', padding: '8px 24px', borderRadius: '6px' }}
+                  >
+                    {lang === 'zh' ? '本地 MCP 配置 (Stdio)' : 'Local MCP Config (Stdio)'}
+                  </button>
+                  <button 
+                    className={`px-8 py-2 rounded-md transition-all ${mcpFormType === 'remote' ? 'tab-active bg-white text-primary shadow-sm font-semibold' : 'text-on-surface-variant hover:text-primary'}`} 
+                    onClick={() => setMcpFormType('remote')}
+                    style={{ border: 'none', cursor: 'pointer', padding: '8px 24px', borderRadius: '6px' }}
+                  >
+                    {lang === 'zh' ? '远程 MCP 服务器' : 'Remote MCP Server'}
+                  </button>
+                </div>
+
+                {mcpFormType === 'local' && (
+                  <div className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                    <div className="card-bento" style={{ padding: '24px' }}>
+                      <h3 className="card-title-text" style={{ marginBottom: '16px', fontSize: '16px' }}>{lang === 'zh' ? '执行环境' : 'Execution Environment'}</h3>
+                      <div className="form-group" style={{ marginBottom: '16px' }}>
+                        <label className="form-label">Command *</label>
+                        <input 
+                          type="text" 
+                          className="form-input-text" 
+                          placeholder="e.g. node, python3, or direct binary path" 
+                          value={mcpFormCommand} 
+                          onChange={(e) => setMcpFormCommand(e.target.value)}
+                        />
+                      </div>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Arguments (Args)</label>
+                        <textarea 
+                          className="form-input-text font-mono text-sm" 
+                          placeholder={lang === 'zh' ? '--path /users/tools\n--verbose' : '--path /users/tools\n--verbose'}
+                          rows={3} 
+                          style={{ width: '100%', resize: 'vertical' }}
+                          value={mcpFormArgs} 
+                          onChange={(e) => setMcpFormArgs(e.target.value)}
+                        />
+                        <p className="form-helper-text" style={{ marginTop: '8px' }}>{lang === 'zh' ? '输入该服务器的启动参数。' : 'Provide start arguments for this server.'}</p>
+                      </div>
+                    </div>
+
+                    <div className="card-bento" style={{ padding: '24px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'between', alignItems: 'center', marginBottom: '16px' }}>
+                        <h3 className="card-title-text" style={{ fontSize: '16px', margin: 0 }}>{lang === 'zh' ? '环境变量 (ENV)' : 'Environment Variables (ENV)'}</h3>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {mcpFormEnv.map((item, index) => (
+                          <div key={index} className="kv-row" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <input 
+                              type="text" 
+                              placeholder="KEY" 
+                              className="form-input-text font-mono" 
+                              style={{ flex: 1 }}
+                              value={item.key} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMcpFormEnv(prev => prev.map((x, i) => i === index ? { ...x, key: val } : x));
+                              }}
+                            />
+                            <input 
+                              type="text" 
+                              placeholder="VALUE" 
+                              className="form-input-text font-mono" 
+                              style={{ flex: 1 }}
+                              value={item.value} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMcpFormEnv(prev => prev.map((x, i) => i === index ? { ...x, value: val } : x));
+                              }}
+                            />
+                            <button 
+                              type="button" 
+                              className="row-action-btn btn-delete"
+                              style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                              onClick={() => {
+                                setMcpFormEnv(prev => prev.filter((_, i) => i !== index));
+                              }}
+                            >
+                              <Icon name="delete" style={{ fontSize: '18px' }} />
+                            </button>
+                          </div>
+                        ))}
+                        <button 
+                          type="button" 
+                          className="btn-secondary" 
+                          style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: '12px' }}
+                          onClick={() => setMcpFormEnv(prev => [...prev, { key: '', value: '' }])}
+                        >
+                          {lang === 'zh' ? '+ 添加变量' : '+ Add Variable'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {mcpFormType === 'remote' && (
+                  <div className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                    <div className="card-bento" style={{ padding: '24px' }}>
+                      <h3 className="card-title-text" style={{ marginBottom: '16px', fontSize: '16px' }}>{lang === 'zh' ? '连接设置' : 'Connection Settings'}</h3>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '16px' }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label">{lang === 'zh' ? '传输协议 *' : 'Transport Protocol *'}</label>
+                          <select 
+                            className="form-select"
+                            value={mcpFormRemoteTransport}
+                            onChange={(e) => setMcpFormRemoteTransport(e.target.value as 'SSE' | 'WebSocket')}
+                          >
+                            <option value="SSE">SSE (Server-Sent Events)</option>
+                            <option value="WebSocket">WebSocket</option>
+                          </select>
+                        </div>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label">Timeout (ms)</label>
+                          <input 
+                            type="number" 
+                            className="form-input-text" 
+                            value={mcpFormTimeout} 
+                            onChange={(e) => setMcpFormTimeout(parseInt(e.target.value) || 30000)}
+                          />
+                        </div>
+                        <div className="form-group" style={{ gridColumn: 'span 2', margin: 0 }}>
+                          <label className="form-label">Server URL *</label>
+                          <input 
+                            type="text" 
+                            className="form-input-text" 
+                            placeholder="e.g. https://api.mcp-service.com/v1/connect" 
+                            value={mcpFormUrl} 
+                            onChange={(e) => setMcpFormUrl(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="card-bento" style={{ padding: '24px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'between', alignItems: 'center', marginBottom: '16px' }}>
+                        <h3 className="card-title-text" style={{ fontSize: '16px', margin: 0 }}>{lang === 'zh' ? '请求头 (Headers)' : 'Headers'}</h3>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {mcpFormHeaders.map((item, index) => (
+                          <div key={index} className="kv-row" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <input 
+                              type="text" 
+                              placeholder="Header Name" 
+                              className="form-input-text font-mono" 
+                              style={{ flex: 1 }}
+                              value={item.key} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMcpFormHeaders(prev => prev.map((x, i) => i === index ? { ...x, key: val } : x));
+                              }}
+                            />
+                            <input 
+                              type="text" 
+                              placeholder="Value" 
+                              className="form-input-text font-mono" 
+                              style={{ flex: 1 }}
+                              value={item.value} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMcpFormHeaders(prev => prev.map((x, i) => i === index ? { ...x, value: val } : x));
+                              }}
+                            />
+                            <button 
+                              type="button" 
+                              className="row-action-btn btn-delete"
+                              style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                              onClick={() => {
+                                setMcpFormHeaders(prev => prev.filter((_, i) => i !== index));
+                              }}
+                            >
+                              <Icon name="delete" style={{ fontSize: '18px' }} />
+                            </button>
+                          </div>
+                        ))}
+                        <button 
+                          type="button" 
+                          className="btn-secondary" 
+                          style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: '12px' }}
+                          onClick={() => setMcpFormHeaders(prev => [...prev, { key: '', value: '' }])}
+                        >
+                          {lang === 'zh' ? '+ 添加 Header' : '+ Add Header'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="card-bento" style={{ padding: '24px' }}>
+                  <h3 className="card-title-text" style={{ marginBottom: '16px', fontSize: '16px' }}>{lang === 'zh' ? '高级配置' : 'Advanced Configuration'}</h3>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px', padding: '16px', backgroundColor: 'var(--surface-low)', borderRadius: '8px', border: '1px dashed var(--border-color)' }}>
+                    <div style={{ marginTop: '2px' }}><Icon name="info" /></div>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontWeight: 600, margin: '0 0 4px 0' }}>{lang === 'zh' ? '权限沙箱模式' : 'Permissions Sandbox Mode'}</p>
+                      <p style={{ fontSize: '12px', color: 'var(--on-surface-variant)', margin: 0 }}>
+                        {lang === 'zh' 
+                          ? '开启后，MCP 服务将 run 在隔离的环境中，无法访问宿主机的敏感资源。推荐对不受信任的第三方服务开启此选项。' 
+                          : 'When enabled, the MCP service runs in an isolated environment and cannot access sensitive host resources.'}
+                      </p>
+                    </div>
+                    <div>
+                      <input 
+                        type="checkbox" 
+                        style={{ cursor: 'pointer', width: '18px', height: '18px', accentColor: 'var(--primary)' }}
+                        checked={mcpFormSandbox}
+                        onChange={(e) => setMcpFormSandbox(e.target.checked)}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <footer style={{
+              position: 'fixed',
+              bottom: 0,
+              right: 0,
+              width: 'calc(100% - var(--sidebar-width))',
+              height: '72px',
+              backgroundColor: 'var(--surface-lowest)',
+              borderTop: '1px solid var(--border-color)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              padding: '0 24px',
+              gap: '12px',
+              zIndex: 40
+            }}>
+              <button 
+                className="btn-secondary" 
+                style={{ padding: '10px 24px' }}
+                onClick={handleCancelMcpForm}
+              >
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </button>
+              <button 
+                className="btn-primary" 
+                style={{ padding: '10px 32px' }}
+                onClick={handleSaveMcpForm}
+              >
+                {lang === 'zh' ? '保存并连接' : 'Save & Connect'}
+              </button>
+            </footer>
+          </div>
+        )}
         {activeTab === 'skill' && (
           <div className="canvas">
             <div className="canvas-container">
@@ -2998,21 +5058,21 @@ export default function App() {
                   </div>
 
                   <div className="list-rows-container" style={{ maxHeight: '500px', overflowY: 'auto' }}>
-                    {tracesList.map(item => (
+                    {conversationSummaries.map(item => (
                       <div 
-                        key={item.session_id} 
-                        className={`list-row-item ${selectedSessionId === item.session_id ? 'bg-surface-low' : ''}`}
+                        key={item.conversation_id} 
+                        className={`list-row-item ${selectedConversationId === item.conversation_id ? 'bg-surface-low' : ''}`}
                         style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch' }}
-                        onClick={() => handleSelectHistory(item.session_id)}
+                        onClick={() => handleSelectConversation(item.conversation_id, item.latestSessionId)}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span className="list-row-title" style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.task_input}</span>
-                          <span className={`status-pill ${item.status === 'completed' ? 'success' : 'warning'}`}>
+                          <span className="list-row-title" style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title}</span>
+                          <span className={`status-pill ${item.latestStatus === 'completed' ? 'success' : 'warning'}`}>
                             {item.status === 'completed' ? (lang === 'zh' ? '完成' : 'Done') : (lang === 'zh' ? '挂起' : 'Pending')}
                           </span>
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--on-surface-variant)', marginTop: '6px' }}>
-                          <span>ID: {item.session_id.substring(0, 10)}...</span>
+                          <span>ID: {item.conversation_id.substring(0, 12)}...</span>
                           <span>{lang === 'zh' ? '循环步数' : 'Loops'}: {item.loop_index}</span>
                         </div>
                       </div>
@@ -3027,7 +5087,7 @@ export default function App() {
                     <span className="card-title-text">{t.traceDetailCard} {selectedSessionId ? selectedSessionId.substring(0, 16) : (lang === 'zh' ? '未选择' : 'Unselected')}</span>
                   </div>
 
-                  {messages.length > 0 && messages[1] && messages[1].trace && messages[1].trace.length > 0 ? (
+                  {conversationTraceEvents.length > 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                       <div className="info-banner">
                         <Icon name="info" className="info-banner-icon" />
@@ -3035,7 +5095,7 @@ export default function App() {
                       </div>
 
                       <div className="trace-logs-list custom-scrollbar" style={{ maxHeight: '450px', backgroundColor: '#fdfdfd' }}>
-                        {messages[1].trace.map((evt, idx) => (
+                        {conversationTraceEvents.map((evt, idx) => (
                           <div key={idx} className="trace-item-row" style={{ padding: '4px 0', borderBottom: '1px solid #f3f3f3' }}>
                             <span className="trace-time">{new Date(evt.timestamp_ms).toLocaleTimeString()}</span>
                             <span className={`trace-tag ${evt.kind.toLowerCase()}`}>{evt.kind}</span>

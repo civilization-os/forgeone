@@ -32,6 +32,7 @@ pub struct ModelRequest {
     pub messages: Vec<PromptMessage>,
     pub prompt_token_estimate: u32,
     pub context_window: u32,
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelRequest {
@@ -49,13 +50,17 @@ impl ModelRequest {
             .sum::<usize>();
 
         format!(
-            "request_id={} messages={} roles=[{}] source_refs={} prompt_tokens={} context_window={}",
+            "request_id={} messages={} roles=[{}] source_refs={} prompt_tokens={} context_window={} max_output_tokens={}",
             self.request_id,
             self.messages.len(),
             roles,
             source_refs,
             self.prompt_token_estimate,
-            self.context_window
+            self.context_window,
+            self
+                .max_output_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string())
         )
     }
 }
@@ -171,6 +176,7 @@ mod tests {
             }],
             prompt_token_estimate: 8,
             context_window: 32_000,
+            max_output_tokens: None,
         });
 
         assert!(matches!(response.action, ModelAction::RequestTool { .. }));
