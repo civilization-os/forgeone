@@ -35,6 +35,8 @@ struct RunParams {
     allowed_tools: Option<Vec<String>>,
     read_roots: Option<Vec<String>>,
     approval_read_roots: Option<Vec<String>>,
+    api_key: Option<String>,
+    base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,15 @@ fn handle_request(
         "run" => {
             let params: RunParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))
                 .map_err(|e| format!("Invalid params for run: {e}"))?;
+            
+            unsafe {
+                if let Some(ref key) = params.api_key {
+                    std::env::set_var("OPENAI_API_KEY", key);
+                }
+                if let Some(ref base) = params.base_url {
+                    std::env::set_var("OPENAI_BASE_URL", base);
+                }
+            }
             
             let mut config = RuntimeConfig::default();
             if let Some(m) = params.model_name {

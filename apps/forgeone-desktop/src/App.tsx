@@ -893,9 +893,30 @@ export default function App() {
 
     try {
       const activeProfile = profiles.find(p => p.id === activeProfileId);
+      
+      let modelNameParam = 'mock';
+      let apiKeyParam = undefined;
+      let baseUrlParam = undefined;
+      
+      if (activeProfile) {
+        apiKeyParam = activeProfile.apiKey;
+        baseUrlParam = activeProfile.baseUrl;
+        if (activeProfile.protocol === 'openai') {
+          modelNameParam = `openai:${activeProfile.modelId}`;
+        } else if (activeProfile.protocol === 'anthropic') {
+          modelNameParam = `openai:${activeProfile.modelId}`; // 将其映射给 openai 适配器处理，支持 proxy
+        } else if (activeProfile.type === 'custom_simple' || activeProfile.type === 'custom_script') {
+          modelNameParam = `openai:${activeProfile.modelId}`;
+        } else {
+          modelNameParam = activeProfile.modelId;
+        }
+      }
+
       const res: RunResult = await (window as any).forgeone.runTask({
         task: taskToSend,
-        model_name: activeProfile ? activeProfile.modelId : 'gpt-4o',
+        model_name: modelNameParam,
+        api_key: apiKeyParam,
+        base_url: baseUrlParam,
         max_loops: maxLoops,
         token_budget: 32000,
         allowed_tools: toolsArr,
