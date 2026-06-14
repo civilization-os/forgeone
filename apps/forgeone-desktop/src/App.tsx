@@ -1062,8 +1062,8 @@ export default function App() {
 
       const delay = Date.now() - startTime;
 
-      // 只要服务器有响应且状态码不为 5xx (即网络通畅，即使是 401 Unauthorized / 400 Bad Request 也说明服务在线且可达)
-      if (response.status < 500) {
+      // 必须状态码为 200 OK，代表鉴权通过且模型服务确实可用
+      if (response.status === 200) {
         setConnectionStatus(prev => ({ 
           ...prev, 
           [id]: { status: 'success', delay } 
