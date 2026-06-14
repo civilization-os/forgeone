@@ -1470,11 +1470,25 @@ export default function App() {
                             {/* 第二行：行为动作 + 旋转加载标 + 信息图标 */}
                             <div className="approval-body-row" style={{ marginTop: '8px' }}>
                               <div className="approval-body-left">
-                                <Icon name="open_in_new" style={{ marginRight: '6px', color: 'var(--on-surface-variant)', opacity: 0.8 }} />
+                                <Icon 
+                                  name={
+                                    pending.tool_name === 'shell' ? 'terminal' :
+                                    pending.tool_name === 'read_file' ? 'article' :
+                                    pending.tool_name === 'write_file' ? 'edit' :
+                                    pending.tool_name === 'search_content' || pending.tool_name === 'search_files' ? 'search' : 'build'
+                                  } 
+                                  style={{ marginRight: '6px', color: 'var(--on-surface-variant)', opacity: 0.8 }} 
+                                />
                                 <span>
                                   {pending.tool_name === 'shell' 
                                     ? (lang === 'zh' ? '正在运行终端命令' : 'Running Command in Terminal')
-                                    : (lang === 'zh' ? '正在浏览器中打开 URL' : 'Opening URL in Browser')}
+                                    : pending.tool_name === 'read_file'
+                                    ? (lang === 'zh' ? '正在读取文件' : 'Reading File')
+                                    : pending.tool_name === 'write_file'
+                                    ? (lang === 'zh' ? '正在修改/写入文件' : 'Writing/Modifying File')
+                                    : (pending.tool_name === 'search_content' || pending.tool_name === 'search_files')
+                                    ? (lang === 'zh' ? '正在搜索/检索项目文件' : 'Searching Project Files')
+                                    : (lang === 'zh' ? `正在调用工具 ${pending.tool_name}` : `Executing Tool ${pending.tool_name}`)}
                                 </span>
                                 <Icon name="sync" className="animate-spin" style={{ fontSize: '12px', color: 'var(--on-surface-variant)', opacity: 0.6, animation: 'spin 2s linear infinite', marginLeft: '6px' }} />
                                 <button 
