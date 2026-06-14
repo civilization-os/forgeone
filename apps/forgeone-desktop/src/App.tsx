@@ -57,6 +57,22 @@ interface Message {
   budgetUsage?: { tokens_estimate: number; tool_call_count: number };
 }
 
+interface ModelProfile {
+  id: string;
+  name: string;
+  type: 'official' | 'custom_simple' | 'custom_script';
+  protocol: 'openai' | 'anthropic';
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  modelId: string;
+  authScript?: string;
+  temperature: number;
+  topP: number;
+  maxTokens: number;
+  autoTruncate?: boolean;
+}
+
 // 国际化词典定义
 const translations = {
   zh: {
@@ -688,16 +704,98 @@ export default function App() {
     delete: false
   });
   
-  // 模型面板状态
-  const [activeProvider, setActiveProvider] = useState<'OpenAI' | 'Anthropic' | 'Local'>('OpenAI');
-  const [apiKey, setApiKey] = useState('sk-proj-••••••••••••••••••••••••••••••••');
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
-  const [defaultModel, setDefaultModel] = useState('gpt-4o');
-  const [temperature, setTemperature] = useState(0.7);
-  const [topP, setTopP] = useState(1.0);
-  const [maxTokens, setMaxTokens] = useState(4096);
-  const [autoTruncate, setAutoTruncate] = useState(true);
+  // 模型面板状态 - 升级为多配置 (Model Profiles) 管理
+  const [profiles, setProfiles] = useState<ModelProfile[]>(() => {
+    const saved = localStorage.getItem('model_profiles');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return [
+      {
+        id: 'openai-default',
+        name: 'Official OpenAI GPT-4o',
+        type: 'official',
+        protocol: 'openai',
+        provider: 'OpenAI',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-proj-••••••••••••••••••••••••••••••••',
+        modelId: 'gpt-4o',
+        temperature: 0.2,
+        topP: 1.0,
+        maxTokens: 4096,
+        autoTruncate: true
+      },
+      {
+        id: 'anthropic-default',
+        name: 'Official Anthropic Claude 3.5',
+        type: 'official',
+        protocol: 'anthropic',
+        provider: 'Anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        apiKey: 'sk-ant-••••••••••••••••••••••••••••••••',
+        modelId: 'claude-3-5-sonnet',
+        temperature: 0.2,
+        topP: 1.0,
+        maxTokens: 4096,
+        autoTruncate: true
+      },
+      {
+        id: 'local-default',
+        name: 'Local Ollama Llama 3',
+        type: 'custom_simple',
+        protocol: 'openai',
+        provider: 'Ollama',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKey: '',
+        modelId: 'llama3',
+        temperature: 0.8,
+        topP: 1.0,
+        maxTokens: 2048,
+        autoTruncate: false
+      }
+    ];
+  });
+
+  const [activeProfileId, setActiveProfileId] = useState<string>(() => {
+    return localStorage.getItem('active_profile_id') || 'openai-default';
+  });
+
+  const activeProfile = profiles.find(p => p.id === activeProfileId);
+
+  // 编辑状态: null -> 主页列表, 'new' -> 新建, 字符串(id) -> 编辑现有
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+
+  // 查看详情的 Modal 选择
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+
+  // 连接测试状态
+  const [connectionStatus, setConnectionStatus] = useState<Record<string, { status: 'testing' | 'success' | 'failed', delay?: number }>>({});
+
+  // 二级编辑表单的临时状态
+  const [formName, setFormName] = useState('');
+  const [formType, setFormType] = useState<'official' | 'custom_simple' | 'custom_script'>('official');
+  const [formProtocol, setFormProtocol] = useState<'openai' | 'anthropic'>('openai');
+  const [formProvider, setFormProvider] = useState('OpenAI');
+  const [formBaseUrl, setFormBaseUrl] = useState('');
+  const [formApiKey, setFormApiKey] = useState('');
+  const [formModelId, setFormModelId] = useState('');
+  const [formAuthScript, setFormAuthScript] = useState(`// Node.js Execution Context\nasync function getAuthHeaders() {\n  return {\n    "Authorization": "Bearer YOUR_TOKEN"\n  };\n}`);
+  const [formTemperature, setFormTemperature] = useState(0.7);
+  const [formTopP, setFormTopP] = useState(1.0);
+  const [formMaxTokens, setFormMaxTokens] = useState(4096);
+  const [formAutoTruncate, setFormAutoTruncate] = useState(true);
+  const [showFormApiKey, setShowFormApiKey] = useState(false);
+
+  // 持久化存储
+  useEffect(() => {
+    localStorage.setItem('model_profiles', JSON.stringify(profiles));
+  }, [profiles]);
+
+  useEffect(() => {
+    localStorage.setItem('active_profile_id', activeProfileId);
+  }, [activeProfileId]);
 
   // MCP 面板状态
   const [mcpSources, setMcpSources] = useState([
@@ -773,9 +871,10 @@ export default function App() {
     const toolsArr = allowedTools.split(',').map(t => t.trim()).filter(Boolean);
 
     try {
+      const activeProfile = profiles.find(p => p.id === activeProfileId);
       const res: RunResult = await (window as any).forgeone.runTask({
         task: taskToSend,
-        model_name: defaultModel,
+        model_name: activeProfile ? activeProfile.modelId : 'gpt-4o',
         max_loops: maxLoops,
         token_budget: 32000,
         allowed_tools: toolsArr,
@@ -891,6 +990,90 @@ export default function App() {
 
   const toggleSkill = (id: string) => {
     setSkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  };
+
+  const handleTestConnection = (id: string) => {
+    setConnectionStatus(prev => ({ ...prev, [id]: { status: 'testing' } }));
+    setTimeout(() => {
+      const delay = Math.floor(Math.random() * 200) + 50;
+      setConnectionStatus(prev => ({ ...prev, [id]: { status: 'success', delay } }));
+    }, 1000);
+  };
+
+  const handleSaveProfile = () => {
+    if (!formName.trim()) {
+      alert(lang === 'zh' ? '请填写配置名称' : 'Please fill config name');
+      return;
+    }
+    
+    const profileId = editingProfileId === 'new' ? `profile-${Date.now()}` : editingProfileId!;
+    const profileData: ModelProfile = {
+      id: profileId,
+      name: formName,
+      type: formType,
+      protocol: formProtocol,
+      provider: formProvider,
+      baseUrl: formType === 'official' ? (formProvider === 'OpenAI' ? 'https://api.openai.com/v1' : 'https://api.anthropic.com/v1') : formBaseUrl,
+      apiKey: formApiKey,
+      modelId: formModelId,
+      authScript: formType === 'custom_script' ? formAuthScript : undefined,
+      temperature: formTemperature,
+      topP: formTopP,
+      maxTokens: formMaxTokens,
+      autoTruncate: formAutoTruncate
+    };
+
+    setProfiles(prev => {
+      if (editingProfileId === 'new') {
+        return [...prev, profileData];
+      } else {
+        return prev.map(p => p.id === editingProfileId ? profileData : p);
+      }
+    });
+
+    setEditingProfileId(null);
+    alert(lang === 'zh' ? '配置已成功保存！' : 'Saved!');
+  };
+
+  const handleStartEdit = (profile: ModelProfile) => {
+    setEditingProfileId(profile.id);
+    setFormName(profile.name);
+    setFormType(profile.type);
+    setFormProtocol(profile.protocol);
+    setFormProvider(profile.provider);
+    setFormBaseUrl(profile.baseUrl);
+    setFormApiKey(profile.apiKey);
+    setFormModelId(profile.modelId);
+    setFormAuthScript(profile.authScript || `// Node.js Execution Context\nasync function getAuthHeaders() {\n  return {\n    "Authorization": "Bearer YOUR_TOKEN"\n  };\n}`);
+    setFormTemperature(profile.temperature);
+    setFormTopP(profile.topP);
+    setFormMaxTokens(profile.maxTokens);
+    setFormAutoTruncate(profile.autoTruncate || false);
+  };
+
+  const handleStartNew = () => {
+    setEditingProfileId('new');
+    setFormName('');
+    setFormType('official');
+    setFormProtocol('openai');
+    setFormProvider('OpenAI');
+    setFormBaseUrl('https://api.openai.com/v1');
+    setFormApiKey('');
+    setFormModelId('gpt-4o');
+    setFormAuthScript(`// Node.js Execution Context\nasync function getAuthHeaders() {\n  return {\n    "Authorization": "Bearer YOUR_TOKEN"\n  };\n}`);
+    setFormTemperature(0.2);
+    setFormTopP(1.0);
+    setFormMaxTokens(4096);
+    setFormAutoTruncate(true);
+  };
+
+  const handleDeleteProfile = (id: string) => {
+    if (confirm(lang === 'zh' ? '确定要删除此模型配置吗？' : 'Are you sure you want to delete this profile?')) {
+      setProfiles(prev => prev.filter(p => p.id !== id));
+      if (activeProfileId === id) {
+        setActiveProfileId('');
+      }
+    }
   };
 
   return (
@@ -1244,7 +1427,7 @@ export default function App() {
                         {/* 极简模型切换浮层 */}
                         <div className="mini-model-selector" onClick={() => setActiveTab('model')}>
                           <Icon name="psychology" className="icon" style={{ marginRight: '4px' }} />
-                          <span>{defaultModel}</span>
+                          <span>{activeProfile ? activeProfile.name : (lang === 'zh' ? '选择模型' : 'Select Model')}</span>
                         </div>
                       </div>
                       <div className="chat-toolbar-right">
@@ -1411,176 +1594,599 @@ export default function App() {
         {activeTab === 'model' && (
           <div className="canvas">
             <div className="canvas-container">
-              <div className="page-header">
+              
+              {/* 1. 主页/列表视图 */}
+              {editingProfileId === null && (
                 <div>
-                  <h2 className="page-header-title">{t.modelTitle}</h2>
-                  <p className="page-header-subtitle">{t.modelSub}</p>
-                </div>
-                <div style={{ display: 'flex', gap: '12px' }}>
-                  <button className="btn-secondary" onClick={() => alert(lang === 'zh' ? '已撤销修改' : 'Discarded')}>{t.modelDiscardBtn}</button>
-                  <button className="btn-primary" onClick={() => alert(lang === 'zh' ? '已成功保存配置！' : 'Saved!')}>{t.modelSaveBtn}</button>
-                </div>
-              </div>
-
-              <div className="grid-bento">
-                <div className="card-bento bento-span-2">
-                  <div className="card-title-row">
-                    <Icon name="api" className="card-title-icon" style={{ marginRight: '6px' }} />
-                    <span className="card-title-text">{t.modelProviderCard}</span>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">{t.modelSelectLabel}</label>
-                    <div className="provider-grid">
-                      <div 
-                        className={`provider-option-card ${activeProvider === 'OpenAI' ? 'active' : ''}`}
-                        onClick={() => { setActiveProvider('OpenAI'); setBaseUrl('https://api.openai.com/v1'); setDefaultModel('gpt-4o'); }}
-                      >
-                        OpenAI
-                      </div>
-                      <div 
-                        className={`provider-option-card ${activeProvider === 'Anthropic' ? 'active' : ''}`}
-                        onClick={() => { setActiveProvider('Anthropic'); setBaseUrl('https://api.anthropic.com/v1'); setDefaultModel('claude-3-5-sonnet'); }}
-                      >
-                        Anthropic
-                      </div>
-                      <div 
-                        className={`provider-option-card ${activeProvider === 'Local' ? 'active' : ''}`}
-                        onClick={() => { setActiveProvider('Local'); setBaseUrl('http://localhost:11434/v1'); setDefaultModel('llama3'); }}
-                      >
-                        Local / Ollama
-                      </div>
+                  <div className="page-header">
+                    <div>
+                      <h2 className="page-header-title">{lang === 'zh' ? '模型管理' : 'Model Management'}</h2>
+                      <p className="page-header-subtitle">
+                        {lang === 'zh' ? '配置、测试并管理自治智能体运行时所连接的大语言模型通道。' : 'Configure, test, and manage the language model channels connected to the Agent Runtime.'}
+                      </p>
                     </div>
+                    <button className="btn-primary" onClick={handleStartNew}>
+                      <Icon name="add" style={{ marginRight: '6px' }} />
+                      {lang === 'zh' ? '添加模型' : 'Add Model'}
+                    </button>
                   </div>
 
-                  <div className="form-group">
-                    <label className="form-label">{t.modelKeyLabel}</label>
-                    <div style={{ position: 'relative' }}>
-                      <input 
-                        type={showApiKey ? 'text' : 'password'} 
-                        className="form-input-text"
-                        value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                      />
-                      <button 
-                        type="button"
-                        style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--on-surface-variant)', display: 'flex', alignItems: 'center' }}
-                        onClick={() => setShowApiKey(!showApiKey)}
-                      >
-                        <Icon name={showApiKey ? 'visibility_off' : 'visibility'} style={{ fontSize: '18px' }} />
+                  <div className="list-rows-container" style={{ display: 'flex', flexDirection: 'column', gap: '12px', background: 'none' }}>
+                    {profiles.map((profile) => {
+                      const isActive = profile.id === activeProfileId;
+                      const conn = connectionStatus[profile.id];
+                      
+                      return (
+                        <div 
+                          key={profile.id} 
+                          className="card-bento" 
+                          style={{ 
+                            flexDirection: 'row', 
+                            justifyContent: 'space-between', 
+                            alignItems: 'center', 
+                            padding: '20px',
+                            borderLeft: isActive ? '4px solid var(--accent-color)' : '1px solid var(--border-color)',
+                            backgroundColor: isActive ? 'rgba(99, 102, 241, 0.03)' : 'var(--surface-lowest)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                            {/* 默认启用单选按钮 */}
+                            <div 
+                              style={{ 
+                                width: '20px', 
+                                height: '20px', 
+                                borderRadius: '50%', 
+                                border: `2px solid ${isActive ? 'var(--accent-color)' : 'var(--on-surface-variant)'}`, 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'center',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s'
+                              }}
+                              onClick={() => {
+                                setActiveProfileId(profile.id);
+                              }}
+                              title={lang === 'zh' ? '设为默认模型' : 'Set as default model'}
+                            >
+                              {isActive && (
+                                <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: 'var(--accent-color)' }} />
+                              )}
+                            </div>
+
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontWeight: 600, fontSize: '16px', color: 'var(--on-surface)' }}>{profile.name}</span>
+                                {isActive && (
+                                  <span className="status-pill success" style={{ fontSize: '9px', padding: '1px 6px' }}>
+                                    {lang === 'zh' ? '当前启用' : 'ACTIVE'}
+                                  </span>
+                                )}
+                                <span className="badge-tag" style={{ margin: 0, padding: '2px 6px', opacity: 0.8 }}>
+                                  {profile.type === 'official' && (lang === 'zh' ? '官方渠道' : 'Official')}
+                                  {profile.type === 'custom_simple' && (lang === 'zh' ? '简单自定义' : 'Simple Custom')}
+                                  {profile.type === 'custom_script' && (lang === 'zh' ? '脚本复杂鉴权' : 'Script Auth')}
+                                </span>
+                              </div>
+                              <div style={{ fontSize: '12.5px', color: 'var(--on-surface-variant)', marginTop: '4px', display: 'flex', gap: '12px' }}>
+                                <span>{lang === 'zh' ? '模型 ID:' : 'Model ID:'} <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--primary)', background: 'var(--surface-low)', padding: '1px 4px', borderRadius: '3px' }}>{profile.modelId}</code></span>
+                                <span>{lang === 'zh' ? '协议:' : 'Protocol:'} <span style={{ textTransform: 'uppercase' }}>{profile.protocol}</span></span>
+                                <span>{lang === 'zh' ? '地址:' : 'Endpoint:'} <span style={{ opacity: 0.7 }}>{profile.baseUrl}</span></span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            {/* 连接检测按钮与状态 */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginRight: '8px' }}>
+                              {conn?.status === 'testing' && (
+                                <span style={{ fontSize: '12px', color: 'var(--on-surface-variant)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <Icon name="sync" style={{ animation: 'spin 2s linear infinite' }} />
+                                  {lang === 'zh' ? '测试中...' : 'Testing...'}
+                                </span>
+                              )}
+                              {conn?.status === 'success' && (
+                                <span className="status-pill success" style={{ display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none' }}>
+                                  ✔ {conn.delay}ms
+                                </span>
+                              )}
+                              {(!conn || conn.status === 'failed') && (
+                                <button 
+                                  className="btn-secondary" 
+                                  style={{ padding: '4px 10px', fontSize: '12px' }}
+                                  onClick={() => handleTestConnection(profile.id)}
+                                >
+                                  🔗 {lang === 'zh' ? '连接检测' : 'Test Connection'}
+                                </button>
+                              )}
+                            </div>
+
+                            <button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => setSelectedProfileId(profile.id)}>
+                              <Icon name="visibility" style={{ marginRight: '4px' }} />
+                              {lang === 'zh' ? '查看' : 'View'}
+                            </button>
+                            
+                            <button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleStartEdit(profile)}>
+                              <Icon name="tune" style={{ marginRight: '4px' }} />
+                              {lang === 'zh' ? '编辑' : 'Edit'}
+                            </button>
+
+                            <button 
+                              className="row-action-btn btn-delete" 
+                              style={{ padding: '8px', borderRadius: '6px' }} 
+                              onClick={() => handleDeleteProfile(profile.id)}
+                            >
+                              <Icon name="delete" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 2. 添加/编辑表单视图 */}
+              {editingProfileId !== null && (
+                <div>
+                  <div className="page-header">
+                    <div>
+                      <h2 className="page-header-title">
+                        {editingProfileId === 'new' ? (lang === 'zh' ? '添加模型配置' : 'Add Model Configuration') : (lang === 'zh' ? '编辑模型配置' : 'Edit Model Configuration')}
+                      </h2>
+                      <p className="page-header-subtitle">
+                        {lang === 'zh' ? '配置大模型底座接入参数、安全网络代理以及独立推理超参数。' : 'Configure LLM integration parameters, proxy settings, and hyperparameters.'}
+                      </p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '12px' }}>
+                      <button className="btn-secondary" onClick={() => setEditingProfileId(null)}>
+                        {lang === 'zh' ? '取消' : 'Cancel'}
+                      </button>
+                      <button className="btn-primary" onClick={handleSaveProfile}>
+                        <Icon name="save" style={{ marginRight: '4px' }} />
+                        {lang === 'zh' ? '保存配置' : 'Save Config'}
                       </button>
                     </div>
                   </div>
 
-                  <div className="form-group">
-                    <label className="form-label">{t.modelUrlLabel}</label>
-                    <input 
-                      type="text" 
-                      className="form-input-text" 
-                      value={baseUrl}
-                      onChange={(e) => setBaseUrl(e.target.value)}
-                    />
-                  </div>
+                  <div className="grid-bento">
+                    {/* 左侧连接参数 */}
+                    <div className="card-bento bento-span-2">
+                      <div className="card-title-row">
+                        <Icon name="api" className="card-title-icon" style={{ marginRight: '6px' }} />
+                        <span className="card-title-text">{lang === 'zh' ? '通道授权参数' : 'Channel Authorization'}</span>
+                      </div>
 
-                  <div className="form-group">
-                    <label className="form-label">{t.modelDefaultSelect}</label>
-                    <select 
-                      className="form-select"
-                      value={defaultModel}
-                      onChange={(e) => setDefaultModel(e.target.value)}
-                    >
-                      {activeProvider === 'OpenAI' && (
-                        <>
-                          <option value="gpt-4o">gpt-4o</option>
-                          <option value="gpt-4-turbo">gpt-4-turbo</option>
-                          <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-                        </>
+                      {/* 模型类型单选卡片 */}
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '选择模型接入模式' : 'Select Integration Mode'}</label>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '16px' }}>
+                          <div 
+                            className={`provider-option-card ${formType === 'official' ? 'active' : ''}`}
+                            onClick={() => {
+                              setFormType('official');
+                              setFormProvider('OpenAI');
+                              setFormProtocol('openai');
+                              setFormBaseUrl('https://api.openai.com/v1');
+                              setFormModelId('gpt-4o');
+                            }}
+                            style={{ padding: '16px 8px', borderRadius: '8px', borderLeft: formType === 'official' ? '3px solid var(--accent-color)' : '1px solid var(--border-color)' }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{lang === 'zh' ? '官方托管渠道' : 'Official Vendor'}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', marginTop: '4px' }}>OpenAI / Anthropic 直连</div>
+                          </div>
+
+                          <div 
+                            className={`provider-option-card ${formType === 'custom_simple' ? 'active' : ''}`}
+                            onClick={() => {
+                              setFormType('custom_simple');
+                              setFormProtocol('openai');
+                              setFormBaseUrl('http://localhost:11434/v1');
+                              setFormModelId('llama3');
+                            }}
+                            style={{ padding: '16px 8px', borderRadius: '8px', borderLeft: formType === 'custom_simple' ? '3px solid var(--accent-color)' : '1px solid var(--border-color)' }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{lang === 'zh' ? '自定义协议(简单)' : 'Custom (Simple)'}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', marginTop: '4px' }}>兼容中转 / Ollama 私有化</div>
+                          </div>
+
+                          <div 
+                            className={`provider-option-card ${formType === 'custom_script' ? 'active' : ''}`}
+                            onClick={() => {
+                              setFormType('custom_script');
+                              setFormProtocol('openai');
+                              setFormBaseUrl('https://gateway.internal/v1');
+                              setFormModelId('custom-model');
+                            }}
+                            style={{ padding: '16px 8px', borderRadius: '8px', borderLeft: formType === 'custom_script' ? '3px solid var(--accent-color)' : '1px solid var(--border-color)' }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{lang === 'zh' ? '复杂脚本鉴权' : 'Script Auth'}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', marginTop: '4px' }}>企业安全网关 JS 签名</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 配置名称 */}
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '配置显示别名' : 'Configuration Alias'}</label>
+                        <input 
+                          type="text" 
+                          className="form-input-text"
+                          placeholder={lang === 'zh' ? '如: 生产环境 GPT-4o' : 'e.g. Production GPT-4o'}
+                          value={formName}
+                          onChange={(e) => setFormName(e.target.value)}
+                        />
+                      </div>
+
+                      {/* 1. 官方模式专属字段 */}
+                      {formType === 'official' && (
+                        <div>
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '官方渠道厂商' : 'Vendor'}</label>
+                            <select 
+                              className="form-select" 
+                              value={formProvider}
+                              onChange={(e) => {
+                                const prov = e.target.value;
+                                setFormProvider(prov);
+                                if (prov === 'OpenAI') {
+                                  setFormProtocol('openai');
+                                  setFormBaseUrl('https://api.openai.com/v1');
+                                  setFormModelId('gpt-4o');
+                                } else {
+                                  setFormProtocol('anthropic');
+                                  setFormBaseUrl('https://api.anthropic.com/v1');
+                                  setFormModelId('claude-3-5-sonnet');
+                                }
+                              }}
+                            >
+                              <option value="OpenAI">OpenAI</option>
+                              <option value="Anthropic">Anthropic (Claude)</option>
+                            </select>
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '接口密钥 (API Key)' : 'API Key'}</label>
+                            <div style={{ position: 'relative' }}>
+                              <input 
+                                type={showFormApiKey ? 'text' : 'password'} 
+                                className="form-input-text"
+                                placeholder={formProvider === 'OpenAI' ? 'sk-proj-...' : 'sk-ant-...'}
+                                value={formApiKey}
+                                onChange={(e) => setFormApiKey(e.target.value)}
+                              />
+                              <button 
+                                type="button"
+                                style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--on-surface-variant)' }}
+                                onClick={() => setShowFormApiKey(!showFormApiKey)}
+                              >
+                                <Icon name={showFormApiKey ? 'visibility_off' : 'visibility'} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '当前默认模型' : 'Default Model'}</label>
+                            <select 
+                              className="form-select"
+                              value={formModelId}
+                              onChange={(e) => setFormModelId(e.target.value)}
+                            >
+                              {formProvider === 'OpenAI' ? (
+                                <>
+                                  <option value="gpt-4o">gpt-4o</option>
+                                  <option value="gpt-4o-mini">gpt-4o-mini</option>
+                                  <option value="o1-preview">o1-preview</option>
+                                  <option value="gpt-4-turbo">gpt-4-turbo</option>
+                                </>
+                              ) : (
+                                <>
+                                  <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+                                  <option value="claude-3-opus">claude-3-opus</option>
+                                  <option value="claude-3-haiku">claude-3-haiku</option>
+                                </>
+                              )}
+                            </select>
+                          </div>
+                        </div>
                       )}
-                      {activeProvider === 'Anthropic' && (
-                        <>
-                          <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
-                          <option value="claude-3-opus">claude-3-opus</option>
-                        </>
+
+                      {/* 2. 自定义简单模式专属字段 */}
+                      {formType === 'custom_simple' && (
+                        <div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }} className="form-group">
+                            <div>
+                              <label className="form-label">{lang === 'zh' ? '兼容标准协议' : 'Compatible Protocol'}</label>
+                              <select 
+                                className="form-select"
+                                value={formProtocol}
+                                onChange={(e) => setFormProtocol(e.target.value as 'openai' | 'anthropic')}
+                              >
+                                <option value="openai">OpenAI 协议</option>
+                                <option value="anthropic">Anthropic (Claude) 协议</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="form-label">{lang === 'zh' ? '提供方名称' : 'Provider Name'}</label>
+                              <input 
+                                type="text" 
+                                className="form-input-text"
+                                placeholder="如: DeepSeek, Ollama"
+                                value={formProvider}
+                                onChange={(e) => setFormProvider(e.target.value)}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '代理地址 (Base URL)' : 'Base URL'}</label>
+                            <input 
+                              type="text" 
+                              className="form-input-text"
+                              placeholder="http://localhost:11434/v1"
+                              value={formBaseUrl}
+                              onChange={(e) => setFormBaseUrl(e.target.value)}
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '接口密钥 (API Key)' : 'API Key'}</label>
+                            <input 
+                              type="password" 
+                              className="form-input-text"
+                              placeholder={lang === 'zh' ? '若本地部署无 Key 可留空' : 'Leave empty if no auth key required'}
+                              value={formApiKey}
+                              onChange={(e) => setFormApiKey(e.target.value)}
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '默认模型标识 ID (Model ID)' : 'Model ID'}</label>
+                            <input 
+                              type="text" 
+                              className="form-input-text"
+                              placeholder="llama3, deepseek-coder"
+                              value={formModelId}
+                              onChange={(e) => setFormModelId(e.target.value)}
+                            />
+                            {/* 快速填入标签 */}
+                            <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                              {['llama3', 'qwen2.5:7b', 'deepseek-chat', 'mistral'].map(lbl => (
+                                <span 
+                                  key={lbl} 
+                                  className="badge-tag" 
+                                  style={{ cursor: 'pointer', margin: 0 }}
+                                  onClick={() => setFormModelId(lbl)}
+                                >
+                                  {lbl}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
                       )}
-                      {activeProvider === 'Local' && (
-                        <>
-                          <option value="llama3">llama3</option>
-                          <option value="qwen2">qwen2</option>
-                          <option value="mistral">mistral</option>
-                        </>
+
+                      {/* 3. 复杂脚本鉴权专属字段 */}
+                      {formType === 'custom_script' && (
+                        <div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }} className="form-group">
+                            <div>
+                              <label className="form-label">{lang === 'zh' ? '代理协议' : 'Protocol'}</label>
+                              <select 
+                                className="form-select"
+                                value={formProtocol}
+                                onChange={(e) => setFormProtocol(e.target.value as 'openai' | 'anthropic')}
+                              >
+                                <option value="openai">OpenAI 协议</option>
+                                <option value="anthropic">Anthropic (Claude) 协议</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="form-label">{lang === 'zh' ? '提供方名称' : 'Provider Name'}</label>
+                              <input 
+                                type="text" 
+                                className="form-input-text"
+                                placeholder="Enterprise Gateway"
+                                value={formProvider}
+                                onChange={(e) => setFormProvider(e.target.value)}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '代理地址 (Base URL)' : 'Base URL'}</label>
+                            <input 
+                              type="text" 
+                              className="form-input-text"
+                              placeholder="https://gateway.company.com/v1"
+                              value={formBaseUrl}
+                              onChange={(e) => setFormBaseUrl(e.target.value)}
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? 'Node.js 动态鉴权脚本代码' : 'Node.js Auth Code'}</label>
+                            <textarea
+                              className="form-input-text"
+                              style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', height: '140px', resize: 'vertical', backgroundColor: 'var(--surface-lowest)', border: '1px solid var(--border-color)', lineHeight: '1.5' }}
+                              value={formAuthScript}
+                              onChange={(e) => setFormAuthScript(e.target.value)}
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">{lang === 'zh' ? '模型标识 ID (Model ID)' : 'Model ID'}</label>
+                            <input 
+                              type="text" 
+                              className="form-input-text"
+                              placeholder="internal-gpt-4o"
+                              value={formModelId}
+                              onChange={(e) => setFormModelId(e.target.value)}
+                            />
+                          </div>
+                        </div>
                       )}
-                    </select>
+                    </div>
+
+                    {/* 右侧独立超参数 */}
+                    <div className="card-bento" style={{ gap: '20px' }}>
+                      <div className="card-title-row">
+                        <Icon name="tune" className="card-title-icon" style={{ marginRight: '6px' }} />
+                        <span className="card-title-text">{lang === 'zh' ? '模型独立推理参数' : 'Inference Settings'}</span>
+                      </div>
+
+                      <div>
+                        <div className="slider-group-header">
+                          <label className="form-label" style={{ marginBottom: 0 }}>{t.modelTempLabel}</label>
+                          <span className="slider-value-display">{formTemperature}</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          className="range-slider-input" 
+                          min="0" 
+                          max="2" 
+                          step="0.1" 
+                          value={formTemperature}
+                          onChange={(e) => setFormTemperature(parseFloat(e.target.value))}
+                        />
+                        <div className="slider-labels-row">
+                          <span>{t.modelPrecise}</span>
+                          <span>{t.modelCreative}</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="slider-group-header">
+                          <label className="form-label" style={{ marginBottom: 0 }}>{t.modelTopPLabel}</label>
+                          <span className="slider-value-display">{formTopP}</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          className="range-slider-input" 
+                          min="0" 
+                          max="1" 
+                          step="0.05" 
+                          value={formTopP}
+                          onChange={(e) => setFormTopP(parseFloat(e.target.value))}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">{t.modelMaxTokensLabel}</label>
+                        <input 
+                          type="number" 
+                          className="form-input-text" 
+                          value={formMaxTokens}
+                          onChange={(e) => setFormMaxTokens(parseInt(e.target.value) || 2048)}
+                        />
+                      </div>
+
+                      <div className="switch-row" style={{ marginTop: '8px' }}>
+                        <div>
+                          <span className="switch-label-title">{t.modelTruncateTitle}</span>
+                          <div className="switch-label-desc">{t.modelTruncateDesc}</div>
+                        </div>
+                        <div 
+                          className={`switch-toggle-bg ${formAutoTruncate ? 'active' : ''}`}
+                          onClick={() => setFormAutoTruncate(!formAutoTruncate)}
+                        >
+                          <div className="switch-toggle-dot" />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
+              )}
 
-                {/* 右侧超参数 */}
-                <div className="card-bento" style={{ gap: '20px' }}>
-                  <div className="card-title-row">
-                    <Icon name="tune" className="card-title-icon" style={{ marginRight: '6px' }} />
-                    <span className="card-title-text">{t.modelParamsCard}</span>
-                  </div>
-
-                  <div>
-                    <div className="slider-group-header">
-                      <label className="form-label" style={{ marginBottom: 0 }}>{t.modelTempLabel}</label>
-                      <span className="slider-value-display">{temperature}</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      className="range-slider-input" 
-                      min="0" 
-                      max="2" 
-                      step="0.1" 
-                      value={temperature}
-                      onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                    />
-                    <div className="slider-labels-row">
-                      <span>{t.modelPrecise}</span>
-                      <span>{t.modelCreative}</span>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="slider-group-header">
-                      <label className="form-label" style={{ marginBottom: 0 }}>{t.modelTopPLabel}</label>
-                      <span className="slider-value-display">{topP}</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      className="range-slider-input" 
-                      min="0" 
-                      max="1" 
-                      step="0.05" 
-                      value={topP}
-                      onChange={(e) => setTopP(parseFloat(e.target.value))}
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">{t.modelMaxTokensLabel}</label>
-                    <input 
-                      type="number" 
-                      className="form-input-text" 
-                      value={maxTokens}
-                      onChange={(e) => setMaxTokens(parseInt(e.target.value) || 2048)}
-                    />
-                  </div>
-
-                  <div className="switch-row" style={{ marginTop: '8px' }}>
-                    <div>
-                      <span className="switch-label-title">{t.modelTruncateTitle}</span>
-                      <div className="switch-label-desc">{t.modelTruncateDesc}</div>
-                    </div>
-                    <div 
-                      className={`switch-toggle-bg ${autoTruncate ? 'active' : ''}`}
-                      onClick={() => setAutoTruncate(!autoTruncate)}
-                    >
-                      <div className="switch-toggle-dot" />
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
+
+            {/* 查看详情只读弹窗 */}
+            {selectedProfileId !== null && (() => {
+              const profile = profiles.find(p => p.id === selectedProfileId);
+              if (!profile) return null;
+              
+              return (
+                <div className="modal-overlay">
+                  <div className="modal-card">
+                    <div className="modal-header">
+                      <span className="modal-title">{lang === 'zh' ? '模型配置详情' : 'Model Profile Info'}</span>
+                      <button className="modal-close-btn" onClick={() => setSelectedProfileId(null)}>
+                        <Icon name="close" />
+                      </button>
+                    </div>
+                    <div className="modal-body custom-scrollbar" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '配置别名' : 'Alias Name'}</label>
+                        <input type="text" className="form-input-text" readOnly value={profile.name} />
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }} className="form-group">
+                        <div>
+                          <label className="form-label">{lang === 'zh' ? '接入类型' : 'Integration Type'}</label>
+                          <input type="text" className="form-input-text" readOnly value={profile.type} style={{ textTransform: 'capitalize' }} />
+                        </div>
+                        <div>
+                          <label className="form-label">{lang === 'zh' ? '兼容协议' : 'Protocol'}</label>
+                          <input type="text" className="form-input-text" readOnly value={profile.protocol.toUpperCase()} />
+                        </div>
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '接口代理地址 (Base URL)' : 'Base URL'}</label>
+                        <input type="text" className="form-input-text" readOnly value={profile.baseUrl} />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '官方厂商 / 协议别名' : 'Vendor'}</label>
+                        <input type="text" className="form-input-text" readOnly value={profile.provider} />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '授权密钥 (API Key)' : 'API Key'}</label>
+                        <input type="text" className="form-input-text" readOnly value={profile.apiKey ? '••••••••••••••••••••••••' : 'No Key'} />
+                      </div>
+
+                      {profile.type === 'custom_script' && (
+                        <div className="form-group">
+                          <label className="form-label">Node.js Auth Script</label>
+                          <textarea className="form-input-text" readOnly style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', height: '100px', resize: 'none' }} value={profile.authScript} />
+                        </div>
+                      )}
+
+                      <div className="form-group">
+                        <label className="form-label">{lang === 'zh' ? '模型标识 ID (Model ID)' : 'Model ID'}</label>
+                        <input type="text" className="form-input-text" readOnly value={profile.modelId} />
+                      </div>
+
+                      <div className="card-bento" style={{ padding: '16px', gap: '12px' }}>
+                        <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--on-surface)' }}>{lang === 'zh' ? '超参数快照' : 'Hyperparameters'}</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', fontSize: '12px', textAlign: 'center' }}>
+                          <div style={{ backgroundColor: 'var(--surface-low)', padding: '6px', borderRadius: '4px' }}>
+                            <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>Temperature</div>
+                            <div style={{ fontWeight: 600, marginTop: '2px' }}>{profile.temperature}</div>
+                          </div>
+                          <div style={{ backgroundColor: 'var(--surface-low)', padding: '6px', borderRadius: '4px' }}>
+                            <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>Top P</div>
+                            <div style={{ fontWeight: 600, marginTop: '2px' }}>{profile.topP}</div>
+                          </div>
+                          <div style={{ backgroundColor: 'var(--surface-low)', padding: '6px', borderRadius: '4px' }}>
+                            <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>Max Tokens</div>
+                            <div style={{ fontWeight: 600, marginTop: '2px' }}>{profile.maxTokens}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                    </div>
+                    <div className="modal-footer">
+                      <button className="btn-primary" onClick={() => setSelectedProfileId(null)}>
+                        {lang === 'zh' ? '确定' : 'OK'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
           </div>
         )}
 
