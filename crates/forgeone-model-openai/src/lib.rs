@@ -133,10 +133,19 @@ fn build_payload(request: &ModelRequest, model: &str, messages: &[PromptMessage]
     let message_values: Vec<serde_json::Value> = messages
         .iter()
         .map(|msg| {
-            serde_json::json!({
-                "role": msg.role,
+            // 当前模型适配器使用自定义 JSON 工具格式（{"tool":"shell","arguments":{...}}）
+            // 而非 OpenAI 结构化 tool_calls。DeepSeek 等 API 对 role:"tool" 要求匹配
+            // tool_call_id，否则返回 400。这里将 tool 消息转为 user 消息以确保兼容。
+            let role = if msg.role == "tool" { "user" } else { &msg.role };
+            let mut m = serde_json::json!({
+                "role": role,
                 "content": msg.content,
-            })
+            });
+            // 如果原始消息有 tool_call_id，仍然带上（兼容支持 tool 的 API）
+            if let Some(tcid) = &msg.tool_call_id {
+                m["tool_call_id"] = serde_json::json!(tcid);
+            }
+            m
         })
         .collect();
 
