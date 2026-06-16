@@ -12,3 +12,5 @@ out/
 /docs/stitch_mcp_service_manager*
 
 
+libtmp*.rlib
+out.txt
