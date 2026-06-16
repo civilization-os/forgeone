@@ -2032,7 +2032,7 @@ export default function App() {
 
   // 策略面板状态
   const [maxLoops, setMaxLoops] = useState(8);
-  const [allowedTools, setAllowedTools] = useState('read_file,write_file,search_files,shell');
+  const [allowedTools, setAllowedTools] = useState('read_file,write_file,search_files,search_content,edit_file,glob,directory_tree,diff,shell');
   const [maxCostBudget, setMaxCostBudget] = useState(5.00);
   const [warningThreshold, setWarningThreshold] = useState(3.00);
   const [requireApprovalForShell, setRequireApprovalForShell] = useState(true);
