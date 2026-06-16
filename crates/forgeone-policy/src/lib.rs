@@ -16,6 +16,10 @@ impl Default for PolicyConfig {
                 "search_content".to_string(),
                 "search_files".to_string(),
                 "write_file".to_string(),
+                "edit_file".to_string(),
+                "glob".to_string(),
+                "directory_tree".to_string(),
+                "diff".to_string(),
             ],
             read_roots: vec![
                 ".".to_string(),

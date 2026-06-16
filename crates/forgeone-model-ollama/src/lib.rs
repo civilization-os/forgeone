@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use forgeone_model::{
-    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse,
+    ModelError,
+    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse, PromptMessage, ToolCall, ContextSnapshot
 };
 
 /// Ollama local model adapter.
@@ -49,6 +50,8 @@ impl ModelAdapter for OllamaModelAdapter {
             return ModelCapabilities {
                 context_window: 32_000,
                 reserved_output_tokens: 4_000,
+                supports_vision: false,
+                supports_tool_role: false,
             };
         }
         if normalized.contains("qwen2.5-coder:7b")
@@ -58,33 +61,34 @@ impl ModelAdapter for OllamaModelAdapter {
             return ModelCapabilities {
                 context_window: 16_000,
                 reserved_output_tokens: 2_000,
+                supports_vision: false,
+                supports_tool_role: false,
             };
         }
         ModelCapabilities {
             context_window: 16_000,
             reserved_output_tokens: 2_000,
+            supports_vision: false,
+            supports_tool_role: false,
         }
     }
 
     fn estimate(&self, request: &ModelRequest) -> ModelRequestEstimate {
         let caps = self.capabilities(&request.model_name);
-        let message_overhead = request.messages.len() as u32 * 8;
         let total_expected_tokens = request
             .prompt_token_estimate
-            .saturating_add(message_overhead)
             .saturating_add(caps.reserved_output_tokens);
         ModelRequestEstimate {
-            prompt_tokens: request
-                .prompt_token_estimate
-                .saturating_add(message_overhead),
+            prompt_tokens: request.prompt_token_estimate,
             total_expected_tokens,
             within_context_window: total_expected_tokens <= caps.context_window,
         }
     }
 
-    fn respond(&self, request: &ModelRequest) -> ModelResponse {
+    fn respond(&self, snapshot: &ContextSnapshot, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         let response_id = format!("ollama-{}", chrono_id());
-        let payload = build_ollama_payload(request);
+        let formatted = self.format_messages(snapshot);
+        let payload = build_ollama_payload(request, &formatted);
         let url = format!("{}/api/chat", self.endpoint.trim_end_matches('/'));
 
         let response_body: serde_json::Value = match ureq::post(&url)
@@ -94,23 +98,11 @@ impl ModelAdapter for OllamaModelAdapter {
             Ok(response) => match response.into_json() {
                 Ok(json) => json,
                 Err(error) => {
-                    return ModelResponse {
-                        response_id,
-                        action: ModelAction::FinalResponse {
-                            content: format!("[ollama adapter] failed to parse response: {error}"),
-                        },
-                        summary: format!("ollama parse error: {error}"),
-                    };
+                    return Err(ModelError::FormatError(error.to_string()));
                 }
             },
             Err(error) => {
-                return ModelResponse {
-                    response_id,
-                    action: ModelAction::FinalResponse {
-                        content: format!("[ollama adapter] request failed: {error}"),
-                    },
-                    summary: format!("ollama request error: {error}"),
-                };
+                return Err(ModelError::NetworkError(error.to_string()));
             }
         };
 
@@ -123,8 +115,11 @@ impl ModelAdapter for OllamaModelAdapter {
         // Strip markdown code fences (```json ... ``` or ``` ... ```)
         let content = strip_code_fence(&raw_content);
 
+        // Try to extract dynamic JSON block, or fall back to code-fence stripped content
+        let content_to_parse = extract_json_block(&content).unwrap_or(content);
+
         // Try to parse as structured tool-call JSON (same format as OpenAI adapter)
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content_to_parse)
             && let Some(tool_name) = parsed.get("tool").and_then(|v| v.as_str())
         {
             let mut arguments = HashMap::new();
@@ -136,28 +131,53 @@ impl ModelAdapter for OllamaModelAdapter {
                     );
                 }
             }
-            return ModelResponse {
+            return Ok(ModelResponse {
                 response_id,
-                action: ModelAction::RequestTool {
-                    tool_name: tool_name.to_string(),
-                    arguments,
+                action: ModelAction::RequestTools {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("tool-{tool_name}"),
+                        tool_name: tool_name.to_string(),
+                        arguments,
+                    }],
                 },
                 summary: format!("ollama requested tool={tool_name}"),
-            };
+            })
         }
 
         // Fall through to final response.
         // Use raw_content (with code fences) so the model's full output is preserved.
-        let summary = truncate_summary(&content);
+        let content_stripped = strip_code_fence(&raw_content);
+        let summary = truncate_summary(&content_stripped);
 
-        ModelResponse {
+        Ok(ModelResponse {
             response_id,
             action: ModelAction::FinalResponse {
                 content: raw_content,
             },
             summary,
+        })
+    }
+}
+
+fn extract_json_block(text: &str) -> Option<String> {
+    let start_idx = text.find("{\"tool\"")
+        .or_else(|| text.find("{\"tool\":"))
+        .or_else(|| text.find("{ \"tool\""))?;
+
+    let mut depth = 0;
+    let bytes = text.as_bytes();
+    for i in start_idx..bytes.len() {
+        if bytes[i] == b'{' {
+            depth += 1;
+        } else if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(text[start_idx..=i].to_string());
+            }
         }
     }
+    None
 }
 
 /// Extract the bare model name from a prefixed name.
@@ -173,9 +193,8 @@ fn strip_model_prefix(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-fn build_ollama_payload(request: &ModelRequest) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = request
-        .messages
+fn build_ollama_payload(request: &ModelRequest, messages: &[PromptMessage]) -> serde_json::Value {
+    let message_values: Vec<serde_json::Value> = messages
         .iter()
         .map(|msg| {
             serde_json::json!({
@@ -187,7 +206,7 @@ fn build_ollama_payload(request: &ModelRequest) -> serde_json::Value {
 
     let mut payload = serde_json::json!({
         "model": strip_model_prefix(&request.model_name),
-        "messages": messages,
+        "messages": message_values,
         "stream": false,
         "options": {
             "temperature": 0.2
@@ -313,18 +332,19 @@ mod tests {
         let request = ModelRequest {
             request_id: next_model_request_id(),
             model_name: "ollama:qwen2.5-coder:7b".to_string(),
-            messages: vec![PromptMessage {
-                message_id: "m1".to_string(),
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-                source_segment_refs: vec![],
-            }],
             prompt_token_estimate: 5,
             context_window: 16_000,
             max_output_tokens: Some(4096),
         };
+        let messages = vec![PromptMessage {
+            message_id: "m1".to_string(),
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            source_segment_refs: vec![],
+            tool_call_id: None,
+        }];
 
-        let payload = build_ollama_payload(&request);
+        let payload = build_ollama_payload(&request, &messages);
         // Prefix "ollama:" must be stripped
         assert_eq!(payload["model"], "qwen2.5-coder:7b");
         assert_eq!(payload["messages"][0]["role"], "user");
@@ -348,12 +368,6 @@ mod tests {
         let request = ModelRequest {
             request_id: next_model_request_id(),
             model_name: "ollama:qwen2.5-coder:7b".to_string(),
-            messages: vec![PromptMessage {
-                message_id: "m1".to_string(),
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-                source_segment_refs: vec![],
-            }],
             prompt_token_estimate: 20,
             context_window: 16_000,
             max_output_tokens: None,

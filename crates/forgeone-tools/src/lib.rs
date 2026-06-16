@@ -148,6 +148,14 @@ impl ToolRegistry {
         registry.register(SearchFilesTool);
         registry.register(WriteFileTool);
         registry.register(ShellTool);
+        registry.register(EditFileTool);
+        registry.register(GlobTool);
+        registry.register(DirectoryTreeTool);
+        registry.register(GitTool);
+        registry.register(DiagnosticsTool);
+        registry.register(DiffTool);
+        registry.register(InvokeSubAgentTool);
+        registry.register(SkillTool);
         registry
     }
 
@@ -362,7 +370,7 @@ impl ToolExecutor for SearchContentTool {
         let root_path = PathBuf::from(&root);
         let mut matches = Vec::new();
         let mut file_count = 0usize;
-        let max_matches = 200;
+        let max_matches: usize = request.arguments.get("limit").and_then(|v| v.parse().ok()).unwrap_or(200);
 
         for entry in walkdir::WalkDir::new(&root_path)
             .follow_links(false)
@@ -648,7 +656,7 @@ impl ToolExecutor for ShellTool {
                 structured_output.insert("exit_code".to_string(), exit_code.to_string());
                 structured_output.insert("stdout".to_string(), stdout_truncated);
                 if !stderr.is_empty() {
-                    structured_output.insert("stderr".to_string(), stderr_truncated);
+                    structured_output.insert("stderr".to_string(), stderr_truncated.clone());
                 }
 
                 let status = if exit_code == 0 {
@@ -666,6 +674,703 @@ impl ToolExecutor for ShellTool {
                 }
             }
             Err(e) => error_result(request, &format!("command_failed={e}")),
+        }
+    }
+}
+
+
+
+// ── skill ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct SkillTool;
+
+impl ToolExecutor for SkillTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "invoke_skill".to_string(),
+            description: "Load and execute a skill (a reusable task template). Provide the skill 'name' as argument. Available skills can be discovered with glob or directory_tree.".to_string(),
+            kind: ToolKind::Skill,
+            required_permissions: vec!["fs_read".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let name = match request.arguments.get("name") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=name"),
+        };
+
+        // Look for .forgeone/skills/<name>/SKILL.md
+        let skill_path = std::path::PathBuf::from(".forgeone/skills").join(name).join("SKILL.md");
+        if !skill_path.exists() {
+            return error_result(request, &format!("skill_not_found: {name} (looked at .forgeone/skills/{name}/SKILL.md)"));
+        }
+
+        match std::fs::read_to_string(&skill_path) {
+            Ok(content) => {
+                let mut structured_output = std::collections::HashMap::new();
+                structured_output.insert("skill".to_string(), name.clone());
+                structured_output.insert("content".to_string(), content);
+
+                ToolCallResult {
+                    call_id: request.call_id.clone(),
+                    status: ToolCallStatus::Success,
+                    structured_output,
+                    error: None,
+                    completed_at_ms: now_ms(),
+                }
+            }
+            Err(e) => error_result(request, &format!("read_failed={e}")),
+        }
+    }
+}
+
+// ── invoke_subagent ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct InvokeSubAgentTool;
+
+impl ToolExecutor for InvokeSubAgentTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "invoke_subagent".to_string(),
+            description: "Spawn a sub-agent to handle a specific sub-task. Provide a detailed prompt in 'task' argument. You can optionally provide 'budget' (e.g. 5000). The runtime intercepts this tool and runs a sub-agent, returning the final result.".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec![],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        // This tool should be intercepted by the runtime. If it reaches here, it means the runtime didn't intercept it.
+        ToolCallResult {
+            call_id: request.call_id.clone(),
+            status: ToolCallStatus::Failed,
+            structured_output: HashMap::new(),
+            error: Some("invoke_subagent must be intercepted by the runtime".to_string()),
+            completed_at_ms: now_ms(),
+        }
+    }
+}
+
+// ── edit_file ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct EditFileTool;
+
+impl ToolExecutor for EditFileTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "edit_file".to_string(),
+            description: "Edit a file by finding unique text and replacing it".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["fs_write".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let path = match request.arguments.get("path") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=path"),
+        };
+        let search = match request.arguments.get("search") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=search"),
+        };
+        let replace = request.arguments.get("replace").map(String::as_str).unwrap_or("");
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return error_result(request, &format!("read_failed={e}")),
+        };
+
+        let count = content.matches(search).count();
+        if count == 0 {
+            return error_result(request, "search_text_not_found");
+        }
+        if count > 1 {
+            return error_result(request, &format!("search_text_not_unique: found {count} matches"));
+        }
+
+        let new_content = content.replace(search, replace);
+        let lines_changed = content.lines().zip(new_content.lines()).filter(|(a, b)| a != b).count();
+
+        match std::fs::write(path, &new_content) {
+            Ok(()) => {
+                let mut structured_output = HashMap::new();
+                structured_output.insert("path".to_string(), path.clone());
+                structured_output.insert("lines_changed".to_string(), lines_changed.to_string());
+                ToolCallResult {
+                    call_id: request.call_id.clone(),
+                    status: ToolCallStatus::Success,
+                    structured_output,
+                    error: None,
+                    completed_at_ms: now_ms(),
+                }
+            }
+            Err(e) => error_result(request, &format!("write_failed={e}")),
+        }
+    }
+}
+
+
+
+// ── glob ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobTool;
+
+impl ToolExecutor for GlobTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "glob".to_string(),
+            description: "List files matching a glob pattern (e.g. **/*.rs, crates/**/Cargo.toml)".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["fs_read".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let pattern = match request.arguments.get("pattern") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=pattern"),
+        };
+        let root = request
+            .arguments
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+
+        let root_path = std::path::PathBuf::from(&root);
+        let max_results: usize = request
+            .arguments
+            .get("limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+
+        let mut results = Vec::new();
+
+        // Simple glob matching: split pattern by / and match segments
+        let parts: Vec<&str> = pattern.split('/').collect();
+
+        // Build recursive matcher
+        collect_glob_matches(&root_path, &parts, 0, &root_path, &mut results, max_results);
+
+        results.sort();
+        let file_count = results.len();
+
+        let mut structured_output = std::collections::HashMap::new();
+        structured_output.insert(
+            "files".to_string(),
+            format!("{}
+{}", file_count, results.join("
+")),
+        );
+        structured_output.insert("file_count".to_string(), file_count.to_string());
+
+        ToolCallResult {
+            call_id: request.call_id.clone(),
+            status: ToolCallStatus::Success,
+            structured_output,
+            error: None,
+            completed_at_ms: now_ms(),
+        }
+    }
+}
+
+fn collect_glob_matches(
+    dir: &std::path::Path,
+    parts: &[&str],
+    depth: usize,
+    root: &std::path::Path,
+    results: &mut Vec<String>,
+    max: usize,
+) {
+    if results.len() >= max {
+        return;
+    }
+    if depth >= parts.len() {
+        // All parts matched - record this path
+        if dir.exists() {
+            if let Ok(rel) = dir.strip_prefix(root) {
+                results.push(rel.display().to_string());
+            }
+        }
+        return;
+    }
+
+    let part = parts[depth];
+    if part == "**" {
+        // ** matches zero or more directories
+        collect_glob_matches(dir, parts, depth + 1, root, results, max);
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    collect_glob_matches(&entry.path(), parts, depth, root, results, max);
+                }
+            }
+        }
+    } else if part.contains('*') || part.contains('?') {
+        // Wildcard matching within a single path segment
+        let re_pattern = format!(
+            "^{}$",
+            part.replace('.', r"\.")
+                .replace('*', ".*")
+                .replace('?', ".")
+        );
+        if let Ok(re) = regex_lite::Regex::new(&re_pattern) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if re.is_match(&name) {
+                        collect_glob_matches(&entry.path(), parts, depth + 1, root, results, max);
+                    }
+                }
+            }
+        }
+    } else {
+        // Exact segment match
+        let next = dir.join(part);
+        if next.exists() {
+            collect_glob_matches(&next, parts, depth + 1, root, results, max);
+        }
+    }
+}
+
+
+
+// ── directory_tree ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryTreeTool;
+
+impl ToolExecutor for DirectoryTreeTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "directory_tree".to_string(),
+            description: "Show directory tree structure with indentation".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["fs_read".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let root = request
+            .arguments
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+        let max_depth: usize = request
+            .arguments
+            .get("max_depth")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let include_deps = request
+            .arguments
+            .get("include_deps")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let root_path = std::path::PathBuf::from(&root);
+        let mut tree_lines = Vec::new();
+
+        build_tree(&root_path, &root_path, 0, max_depth, include_deps, &mut tree_lines);
+
+        let mut structured_output = std::collections::HashMap::new();
+        structured_output.insert(
+            "tree".to_string(),
+            tree_lines.join("\n"),
+        );
+        structured_output.insert("entry_count".to_string(), tree_lines.len().to_string());
+
+        ToolCallResult {
+            call_id: request.call_id.clone(),
+            status: ToolCallStatus::Success,
+            structured_output,
+            error: None,
+            completed_at_ms: now_ms(),
+        }
+    }
+}
+
+fn build_tree(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    depth: usize,
+    max_depth: usize,
+    include_deps: bool,
+    lines: &mut Vec<String>,
+) {
+    if depth > max_depth {
+        return;
+    }
+
+    let indent = if depth == 0 {
+        String::new()
+    } else {
+        "  ".repeat(depth)
+    };
+
+    if depth == 0 {
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            lines.push(format!("{}/", name));
+        } else {
+            lines.push("./".to_string());
+        }
+    }
+
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in &entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+
+        // Skip hidden/dep dirs unless include_deps
+        if !include_deps {
+            let lower = name.to_lowercase();
+            if lower == "node_modules" || lower == "target" || lower == ".git"
+                || lower == ".venv" || lower == "__pycache__" || lower == "dist"
+            {
+                continue;
+            }
+        }
+
+        let line = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            format!("{}{}/", indent, name)
+        } else {
+            format!("{}{}", indent, name)
+        };
+        lines.push(line);
+
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            build_tree(&path, root, depth + 1, max_depth, include_deps, lines);
+        }
+    }
+}
+
+
+
+// ── git ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct GitTool;
+
+impl ToolExecutor for GitTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "git".to_string(),
+            description: "Run git commands (status, diff, log, show, branch)".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["cmd_exec".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let command = match request.arguments.get("command") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=command"),
+        };
+        let args_str = request.arguments.get("args").map(String::as_str).unwrap_or("");
+        let path = request.arguments.get("path").map(String::as_str).unwrap_or(".");
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg(command);
+        cmd.current_dir(path);
+
+        // Parse additional args separated by spaces
+        for arg in args_str.split_whitespace() {
+            if !arg.is_empty() {
+                cmd.arg(arg);
+            }
+        }
+
+        match cmd.output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let exit_code = output.status.code().unwrap_or(-1);
+
+                let stdout_truncated = truncate_output(&stdout, 16000);
+                let stderr_truncated = truncate_output(&stderr, 2000);
+
+                let mut structured_output = std::collections::HashMap::new();
+                structured_output.insert("exit_code".to_string(), exit_code.to_string());
+                structured_output.insert("stdout".to_string(), stdout_truncated);
+                if !stderr.is_empty() {
+                    structured_output.insert("stderr".to_string(), stderr_truncated.clone());
+                }
+                structured_output.insert("git_command".to_string(), format!("git {}", command));
+
+                let status = if exit_code == 0 {
+                    ToolCallStatus::Success
+                } else {
+                    ToolCallStatus::Failed
+                };
+
+                ToolCallResult {
+                    call_id: request.call_id.clone(),
+                    status,
+                    structured_output,
+                    error: if !stderr.is_empty() { Some(stderr_truncated) } else { None },
+                    completed_at_ms: now_ms(),
+                }
+            }
+            Err(e) => error_result(request, &format!("git_exec_failed={e}")),
+        }
+    }
+}
+
+
+
+// ── diagnostics ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticsTool;
+
+impl ToolExecutor for DiagnosticsTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "diagnostics".to_string(),
+            description: "Run cargo check and return structured compiler diagnostics".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["cmd_exec".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let path = request.arguments.get("path").cloned().unwrap_or_else(|| ".".to_string());
+        let extra_args = request.arguments.get("args").cloned().unwrap_or_default();
+
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("check");
+        cmd.current_dir(&path);
+
+        // Pass through extra args like --tests or --all-targets
+        for arg in extra_args.split_whitespace() {
+            if !arg.is_empty() {
+                cmd.arg(arg);
+            }
+        }
+
+        // Use message-format json for structured output
+        cmd.args(["--message-format", "json"]);
+
+        match cmd.output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let exit_code = output.status.code().unwrap_or(-1);
+
+                let mut errors = Vec::new();
+                let mut warnings = Vec::new();
+
+                // Parse JSON lines from cargo output
+                for line in stdout.lines() {
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let Some(reason) = msg.get("reason").and_then(|v| v.as_str()) {
+                            if reason == "compiler-message" {
+                                if let Some(message) = msg.get("message") {
+                                    let level = message.get("level").and_then(|v| v.as_str()).unwrap_or("");
+                                    let msg_text = message.get("rendered").and_then(|v| v.as_str())
+                                        .or_else(|| message.get("message").and_then(|v| v.as_str()))
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    if level == "error" {
+                                        errors.push(msg_text);
+                                    } else if level == "warning" {
+                                        warnings.push(msg_text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also parse any human-readable output in stderr
+                let stderr_text = stderr.to_string();
+
+                let mut structured_output = std::collections::HashMap::new();
+                structured_output.insert("exit_code".to_string(), exit_code.to_string());
+                structured_output.insert(
+                    "error_count".to_string(),
+                    errors.len().to_string(),
+                );
+                structured_output.insert(
+                    "warning_count".to_string(),
+                    warnings.len().to_string(),
+                );
+                if !errors.is_empty() {
+                    structured_output.insert(
+                        "errors".to_string(),
+                        errors.join("\n---\n"),
+                    );
+                }
+                if !warnings.is_empty() {
+                    structured_output.insert(
+                        "warnings".to_string(),
+                        warnings.join("\n---\n"),
+                    );
+                }
+                if !stderr_text.is_empty() {
+                    structured_output.insert("stderr".to_string(), truncate_output(&stderr_text, 4000));
+                }
+
+                let status = if exit_code == 0 {
+                    ToolCallStatus::Success
+                } else {
+                    ToolCallStatus::Failed
+                };
+
+                ToolCallResult {
+                    call_id: request.call_id.clone(),
+                    status,
+                    structured_output,
+                    error: if errors.is_empty() { None } else { Some(format!("{} errors", errors.len())) },
+                    completed_at_ms: now_ms(),
+                }
+            }
+            Err(e) => error_result(request, &format!("cargo_exec_failed={e}")),
+        }
+    }
+}
+
+
+
+// ── diff ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct DiffTool;
+
+impl ToolExecutor for DiffTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            tool_name: "diff".to_string(),
+            description: "Compare two files and return structured differences".to_string(),
+            kind: ToolKind::Builtin,
+            required_permissions: vec!["fs_read".to_string()],
+        }
+    }
+
+    fn execute(&self, request: &ToolCallRequest) -> ToolCallResult {
+        let path_a = match request.arguments.get("path_a") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=path_a"),
+        };
+        let path_b = match request.arguments.get("path_b") {
+            Some(v) => v,
+            None => return error_result(request, "missing_argument=path_b"),
+        };
+
+        let content_a = match std::fs::read_to_string(path_a) {
+            Ok(c) => c,
+            Err(e) => return error_result(request, &format!("read_a_failed={e}")),
+        };
+        let content_b = match std::fs::read_to_string(path_b) {
+            Ok(c) => c,
+            Err(e) => return error_result(request, &format!("read_b_failed={e}")),
+        };
+
+        let lines_a: Vec<&str> = content_a.lines().collect();
+        let lines_b: Vec<&str> = content_b.lines().collect();
+
+        // Simple LCS-based diff
+        let mut hunks = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        while i < lines_a.len() || j < lines_b.len() {
+            if i < lines_a.len() && j < lines_b.len() && lines_a[i] == lines_b[j] {
+                i += 1;
+                j += 1;
+                continue;
+            }
+            // Found a difference - collect the hunk
+            let hunk_start_a = i + 1;
+            let hunk_start_b = j + 1;
+            let mut hunk_lines_a = Vec::new();
+            let mut hunk_lines_b = Vec::new();
+
+            while i < lines_a.len() || j < lines_b.len() {
+                if i < lines_a.len() && j < lines_b.len() && lines_a[i] == lines_b[j] {
+                    break;
+                }
+                if i < lines_a.len() {
+                    hunk_lines_a.push(lines_a[i]);
+                    i += 1;
+                }
+                if j < lines_b.len() {
+                    hunk_lines_b.push(lines_b[j]);
+                    j += 1;
+                }
+            }
+
+            let hunk = if hunk_lines_b.is_empty() {
+                format!(
+                    "@@ -{},{}+{},{} @@
+deleted:
+  {}",
+                    hunk_start_a, hunk_lines_a.len(), hunk_start_b, 0,
+                    hunk_lines_a.join("
+  ")
+                )
+            } else if hunk_lines_a.is_empty() {
+                format!(
+                    "@@ -{},{}+{},{} @@
+added:
+  {}",
+                    hunk_start_a, 0, hunk_start_b, hunk_lines_b.len(),
+                    hunk_lines_b.join("
+  ")
+                )
+            } else {
+                let mut sb = format!(
+                    "@@ -{},{}+{},{} @@
+",
+                    hunk_start_a, hunk_lines_a.len(), hunk_start_b, hunk_lines_b.len()
+                );
+                for (idx, line) in hunk_lines_a.iter().enumerate() {
+                    if idx < hunk_lines_b.len() && line == &hunk_lines_b[idx] {
+                        sb.push_str(&format!(" {}
+", line));
+                    } else {
+                        sb.push_str(&format!("-{}
+", line));
+                    }
+                }
+                for idx in 0..hunk_lines_b.len() {
+                    if idx >= hunk_lines_a.len() || hunk_lines_a[idx] != hunk_lines_b[idx] {
+                        sb.push_str(&format!("+{}
+", hunk_lines_b[idx]));
+                    }
+                }
+                sb
+            };
+            hunks.push(hunk);
+        }
+
+        let output = if hunks.is_empty() {
+            "files are identical".to_string()
+        } else {
+            hunks.join("
+")
+        };
+
+        let mut structured_output = std::collections::HashMap::new();
+        structured_output.insert("hunks".to_string(), output);
+        structured_output.insert("hunk_count".to_string(), hunks.len().to_string());
+        structured_output.insert("lines_a".to_string(), lines_a.len().to_string());
+        structured_output.insert("lines_b".to_string(), lines_b.len().to_string());
+
+        ToolCallResult {
+            call_id: request.call_id.clone(),
+            status: ToolCallStatus::Success,
+            structured_output,
+            error: None,
+            completed_at_ms: now_ms(),
         }
     }
 }
@@ -768,60 +1473,6 @@ pub struct McpHeader {
     pub value: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
 
-    use super::{ShellTool, ToolCallRequest, ToolCallStatus, ToolExecutor, ToolRegistry, next_tool_call_id};
 
-    #[test]
-    fn read_file_tool_returns_preview() {
-        let registry = ToolRegistry::with_builtin_tools();
-        let mut arguments = HashMap::new();
-        arguments.insert("path".to_string(), "Cargo.toml".to_string());
-
-        let result = registry.execute(&ToolCallRequest {
-            call_id: next_tool_call_id(),
-            session_id: "session-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            loop_index: 1,
-            tool_name: "read_file".to_string(),
-            arguments,
-            requested_by: "runtime".to_string(),
-        });
-
-        assert_eq!(result.status, ToolCallStatus::Success);
-        assert!(result.structured_output.contains_key("preview"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn shell_tool_handles_trailing_backslash_arguments() {
-        let mut arguments = HashMap::new();
-        arguments.insert("command".to_string(), "dir C:\\".to_string());
-
-        let result = ShellTool.execute(&ToolCallRequest {
-            call_id: next_tool_call_id(),
-            session_id: "session-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            loop_index: 1,
-            tool_name: "shell".to_string(),
-            arguments,
-            requested_by: "runtime".to_string(),
-        });
-
-        assert_eq!(result.status, ToolCallStatus::Success);
-        assert_eq!(
-            result.structured_output.get("exit_code").map(String::as_str),
-            Some("0")
-        );
-        assert!(result.structured_output.contains_key("stdout"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn decode_windows_console_output_handles_utf16le() {
-        let bytes = "C:\\盘符\r\n".encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect::<Vec<_>>();
-        assert_eq!(super::decode_windows_console_output(&bytes), "C:\\盘符\r\n");
-    }
-}
+include!("test_module.rs");

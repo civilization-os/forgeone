@@ -9,7 +9,7 @@ members = [
     "crates/forgeone-session",
     "crates/forgeone-tools",
     "crates/forgeone-trace",
-    "crates/forgeone-server",
+    "crates/forgeone-server", "crates/forgeone-eval",
 ]
 resolver = "2"
 

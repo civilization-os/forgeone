@@ -4,6 +4,7 @@ use forgeone_runtime::{RuntimeCore, RunRequest, RuntimeConfig};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<serde_json::Value>,
     method: String,
@@ -108,6 +109,49 @@ fn main() {
     }
 }
 
+
+fn serialize_run_result(res: forgeone_runtime::RunResult) -> serde_json::Value {
+    serde_json::json!({
+        "state": {
+            "session_id": res.state.session_id,
+            "task_id": res.state.task_id,
+            "agent_id": res.state.agent_id,
+            "parent_agent_id": res.state.parent_agent_id,
+            "loop_index": res.state.loop_index,
+            "status": res.state.status.to_string(),
+            "current_phase": res.state.current_phase.to_string(),
+            "observations": res.state.observations.iter().map(|o| {
+                serde_json::json!({
+                    "tool_name": o.tool_name,
+                    "summary": o.summary,
+                    "content": o.content,
+                })
+            }).collect::<Vec<_>>(),
+            "policy_decisions": res.state.policy_decisions.iter().map(|p| {
+                serde_json::json!({
+                    "scope": p.scope,
+                    "decision": p.decision,
+                    "detail": p.detail,
+                })
+            }).collect::<Vec<_>>(),
+            "pending_approval": res.state.pending_approval.as_ref().map(|p| {
+                serde_json::json!({
+                    "tool_name": p.tool_name,
+                    "reason": p.reason,
+                    "argument_summary": p.argument_summary,
+                })
+            }),
+            "budget_usage": {
+                "tokens_estimate": res.state.budget_usage.tokens_estimate,
+                "tool_call_count": res.state.budget_usage.tool_call_count,
+            },
+            "stop_reason": res.state.stop_reason.as_ref().map(|s| s.to_string()),
+        },
+        "final_response": res.final_response,
+        "trace": res.trace,
+    })
+}
+
 fn handle_request(
     runtime: &RuntimeCore,
     method: &str,
@@ -161,145 +205,21 @@ fn handle_request(
             };
 
             let res = runtime.run(req);
-            
-            // Serialize RunResult using custom JSON mapping
-            // since RunResult does not implement Serialize/Deserialize directly,
-            // we map it to serde_json::Value manually.
-            let serialized = serde_json::json!({
-                "state": {
-                    "session_id": res.state.session_id,
-                    "task_id": res.state.task_id,
-                    "agent_id": res.state.agent_id,
-                    "parent_agent_id": res.state.parent_agent_id,
-                    "loop_index": res.state.loop_index,
-                    "status": res.state.status.to_string(),
-                    "current_phase": res.state.current_phase.to_string(),
-                    "observations": res.state.observations.iter().map(|o| {
-                        serde_json::json!({
-                            "tool_name": o.tool_name,
-                            "summary": o.summary,
-                            "content": o.content,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "policy_decisions": res.state.policy_decisions.iter().map(|p| {
-                        serde_json::json!({
-                            "scope": p.scope,
-                            "decision": p.decision,
-                            "detail": p.detail,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "pending_approval": res.state.pending_approval.as_ref().map(|p| {
-                        serde_json::json!({
-                            "tool_name": p.tool_name,
-                            "reason": p.reason,
-                            "argument_summary": p.argument_summary,
-                        })
-                    }),
-                    "budget_usage": {
-                        "tokens_estimate": res.state.budget_usage.tokens_estimate,
-                        "tool_call_count": res.state.budget_usage.tool_call_count,
-                    },
-                    "stop_reason": res.state.stop_reason.as_ref().map(|s| s.to_string()),
-                },
-                "final_response": res.final_response,
-                "trace": res.trace,
-            });
-
-            Ok(serialized)
+            Ok(serialize_run_result(res))
         }
         "approve" => {
             let params: SessionIdParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))
                 .map_err(|e| format!("Invalid params for approve: {e}"))?;
             
             let res = runtime.approve_session(&params.session_id)?;
-            let serialized = serde_json::json!({
-                "state": {
-                    "session_id": res.state.session_id,
-                    "task_id": res.state.task_id,
-                    "agent_id": res.state.agent_id,
-                    "parent_agent_id": res.state.parent_agent_id,
-                    "loop_index": res.state.loop_index,
-                    "status": res.state.status.to_string(),
-                    "current_phase": res.state.current_phase.to_string(),
-                    "observations": res.state.observations.iter().map(|o| {
-                        serde_json::json!({
-                            "tool_name": o.tool_name,
-                            "summary": o.summary,
-                            "content": o.content,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "policy_decisions": res.state.policy_decisions.iter().map(|p| {
-                        serde_json::json!({
-                            "scope": p.scope,
-                            "decision": p.decision,
-                            "detail": p.detail,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "pending_approval": res.state.pending_approval.as_ref().map(|p| {
-                        serde_json::json!({
-                            "tool_name": p.tool_name,
-                            "reason": p.reason,
-                            "argument_summary": p.argument_summary,
-                        })
-                    }),
-                    "budget_usage": {
-                        "tokens_estimate": res.state.budget_usage.tokens_estimate,
-                        "tool_call_count": res.state.budget_usage.tool_call_count,
-                    },
-                    "stop_reason": res.state.stop_reason.as_ref().map(|s| s.to_string()),
-                },
-                "final_response": res.final_response,
-                "trace": res.trace,
-            });
-
-            Ok(serialized)
+            Ok(serialize_run_result(res))
         }
         "resume" => {
             let params: SessionIdParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))
                 .map_err(|e| format!("Invalid params for resume: {e}"))?;
             
             let res = runtime.resume_session(&params.session_id)?;
-            let serialized = serde_json::json!({
-                "state": {
-                    "session_id": res.state.session_id,
-                    "task_id": res.state.task_id,
-                    "agent_id": res.state.agent_id,
-                    "parent_agent_id": res.state.parent_agent_id,
-                    "loop_index": res.state.loop_index,
-                    "status": res.state.status.to_string(),
-                    "current_phase": res.state.current_phase.to_string(),
-                    "observations": res.state.observations.iter().map(|o| {
-                        serde_json::json!({
-                            "tool_name": o.tool_name,
-                            "summary": o.summary,
-                            "content": o.content,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "policy_decisions": res.state.policy_decisions.iter().map(|p| {
-                        serde_json::json!({
-                            "scope": p.scope,
-                            "decision": p.decision,
-                            "detail": p.detail,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "pending_approval": res.state.pending_approval.as_ref().map(|p| {
-                        serde_json::json!({
-                            "tool_name": p.tool_name,
-                            "reason": p.reason,
-                            "argument_summary": p.argument_summary,
-                        })
-                    }),
-                    "budget_usage": {
-                        "tokens_estimate": res.state.budget_usage.tokens_estimate,
-                        "tool_call_count": res.state.budget_usage.tool_call_count,
-                    },
-                    "stop_reason": res.state.stop_reason.as_ref().map(|s| s.to_string()),
-                },
-                "final_response": res.final_response,
-                "trace": res.trace,
-            });
-
-            Ok(serialized)
+            Ok(serialize_run_result(res))
         }
         "list_pending" => {
             let list = runtime.list_pending_approvals()?;

@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog } from 'electron';
 import * as path from 'path';
 import * as http from 'http';
 import * as https from 'https';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import * as fs from 'fs/promises';
 
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcessWithoutNullStreams | null = null;
@@ -255,4 +256,50 @@ ipcMain.handle('window:get-state', (event) => {
   return {
     isMaximized: window?.isMaximized() ?? false,
   };
+});
+
+ipcMain.handle('fs:select-dir', async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) return null;
+  const result = await dialog.showOpenDialog(window, {
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+});
+
+ipcMain.handle('fs:read-dir', async (_, dirPath) => {
+  try {
+    const resolvedPath = path.resolve(dirPath);
+    const entries = await fs.readdir(resolvedPath, { withFileTypes: true });
+    return entries
+      .filter(entry => !['node_modules', '.git', 'dist', 'dist-electron', '.gemini', '.idea', '.vscode'].includes(entry.name))
+      .map(entry => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+        path: path.join(resolvedPath, entry.name),
+      }));
+  } catch (err: any) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle('fs:read-file', async (_, filePath) => {
+  try {
+    const content = await fs.readFile(path.resolve(filePath), 'utf-8');
+    return { content };
+  } catch (err: any) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle('fs:write-file', async (_, filePath, content) => {
+  try {
+    await fs.writeFile(path.resolve(filePath), content, 'utf-8');
+    return { success: true };
+  } catch (err: any) {
+    return { error: err.message };
+  }
 });

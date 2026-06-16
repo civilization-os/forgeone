@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use forgeone_model::{
-    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse,
+    ModelError,
+    ModelAction, ModelAdapter, ModelCapabilities, ModelRequest, ModelRequestEstimate, ModelResponse, PromptMessage, ToolCall, ContextSnapshot
 };
 
 /// OpenAI-compatible model adapter.
@@ -55,37 +56,39 @@ impl ModelAdapter for OpenAiModelAdapter {
             return ModelCapabilities {
                 context_window: 1_000_000,
                 reserved_output_tokens: 32_000,
+                supports_vision: true,
+                supports_tool_role: true,
             };
         }
         if normalized.contains("gpt-4o-mini") {
             return ModelCapabilities {
                 context_window: 128_000,
                 reserved_output_tokens: 12_000,
+                supports_vision: true,
+                supports_tool_role: true,
             };
         }
         ModelCapabilities {
             context_window: 128_000,
             reserved_output_tokens: 16_000,
+            supports_vision: false,
+            supports_tool_role: false,
         }
     }
 
     fn estimate(&self, request: &ModelRequest) -> ModelRequestEstimate {
         let caps = self.capabilities(&request.model_name);
-        let message_overhead = request.messages.len() as u32 * 12;
         let total_expected_tokens = request
             .prompt_token_estimate
-            .saturating_add(message_overhead)
             .saturating_add(caps.reserved_output_tokens);
         ModelRequestEstimate {
-            prompt_tokens: request
-                .prompt_token_estimate
-                .saturating_add(message_overhead),
+            prompt_tokens: request.prompt_token_estimate,
             total_expected_tokens,
             within_context_window: total_expected_tokens <= caps.context_window,
         }
     }
 
-    fn respond(&self, request: &ModelRequest) -> ModelResponse {
+    fn respond(&self, snapshot: &ContextSnapshot, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         let response_id = format!("openai-{}", chrono_id());
         // Derive the actual model ID: strip the "openai:" routing prefix if present,
         // so that request.model_name="openai:qwen2.5-coder:14b" → model="qwen2.5-coder:14b".
@@ -95,7 +98,8 @@ impl ModelAdapter for OpenAiModelAdapter {
         } else {
             self.model.clone()
         };
-        let payload = build_payload(request, &model_id);
+        let formatted = self.format_messages(snapshot);
+        let payload = build_payload(request, &model_id, &formatted);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response_body: serde_json::Value = match ureq::post(&url)
@@ -106,33 +110,27 @@ impl ModelAdapter for OpenAiModelAdapter {
             Ok(response) => match response.into_json() {
                 Ok(json) => json,
                 Err(error) => {
-                    return ModelResponse {
-                        response_id,
-                        action: ModelAction::FinalResponse {
-                            content: format!("[openai adapter] failed to parse response: {error}"),
-                        },
-                        summary: format!("openai parse error: {error}"),
-                    };
+                    return Err(ModelError::FormatError(error.to_string()));
                 }
             },
             Err(error) => {
-                return ModelResponse {
-                    response_id,
-                    action: ModelAction::FinalResponse {
-                        content: format!("[openai adapter] request failed: {error}"),
-                    },
-                    summary: format!("openai request error: {error}"),
-                };
+                
+                if error.to_string().contains("429") {
+                    return Err(ModelError::RateLimit);
+                } else if error.to_string().contains("timeout") {
+                    return Err(ModelError::Timeout);
+                }
+                return Err(ModelError::NetworkError(error.to_string()));
+  
             }
         };
 
-        parse_response(&response_body, &response_id)
+        Ok(parse_response(&response_body, &response_id))
     }
 }
 
-fn build_payload(request: &ModelRequest, model: &str) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = request
-        .messages
+fn build_payload(request: &ModelRequest, model: &str, messages: &[PromptMessage]) -> serde_json::Value {
+    let message_values: Vec<serde_json::Value> = messages
         .iter()
         .map(|msg| {
             serde_json::json!({
@@ -144,7 +142,7 @@ fn build_payload(request: &ModelRequest, model: &str) -> serde_json::Value {
 
     let mut payload = serde_json::json!({
         "model": model,
-        "messages": messages,
+        "messages": message_values,
         "temperature": 0.2,
     });
 
@@ -155,6 +153,26 @@ fn build_payload(request: &ModelRequest, model: &str) -> serde_json::Value {
     payload
 }
 
+fn extract_json_block(text: &str) -> Option<String> {
+    let start_idx = text.find("{\"tool\"")
+        .or_else(|| text.find("{\"tool\":"))
+        .or_else(|| text.find("{ \"tool\""))?;
+
+    let mut depth = 0;
+    let bytes = text.as_bytes();
+    for i in start_idx..bytes.len() {
+        if bytes[i] == b'{' {
+            depth += 1;
+        } else if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(text[start_idx..=i].to_string());
+            }
+        }
+    }
+    None
+}
+
 fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse {
     // Extract the response content
     let raw_content = body["choices"][0]["message"]["content"]
@@ -163,11 +181,13 @@ fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse 
         .to_string();
 
     // Strip markdown code fences (```json ... ``` or ``` ... ```)
-    // Models often wrap JSON tool calls in code blocks
     let content = strip_code_fence(&raw_content);
 
+    // Try to extract dynamic JSON block, or fall back to code-fence stripped content
+    let content_to_parse = extract_json_block(&content).unwrap_or(content);
+
     // Try to parse as a structured tool-call JSON
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content_to_parse)
         && let Some(tool_name) = parsed.get("tool").and_then(|v| v.as_str())
     {
         let mut arguments = HashMap::new();
@@ -181,9 +201,13 @@ fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse 
         }
         return ModelResponse {
             response_id: response_id.to_string(),
-            action: ModelAction::RequestTool {
-                tool_name: tool_name.to_string(),
-                arguments,
+            action: ModelAction::RequestTools {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("tool-{tool_name}"),
+                    tool_name: tool_name.to_string(),
+                    arguments,
+                }],
             },
             summary: format!("openai requested tool={tool_name}"),
         };
@@ -191,7 +215,8 @@ fn parse_response(body: &serde_json::Value, response_id: &str) -> ModelResponse 
 
     // Could not parse as a tool call — treat as final response.
     // Use raw_content (with code fences) so the model's full output is preserved.
-    let summary = truncate_summary(&content);
+    let content_stripped = strip_code_fence(&raw_content);
+    let summary = truncate_summary(&content_stripped);
 
     ModelResponse {
         response_id: response_id.to_string(),
@@ -266,12 +291,11 @@ mod tests {
         });
 
         let response = parse_response(&body, "test-1");
-        assert!(matches!(response.action, ModelAction::RequestTool { .. }));
+        assert!(matches!(response.action, ModelAction::RequestTools { .. }));
         match response.action {
-            ModelAction::RequestTool {
-                ref tool_name,
-                ref arguments,
-            } => {
+            ModelAction::RequestTools { tool_calls, .. } => {
+                let tool_name = &tool_calls[0].tool_name;
+                let arguments = &tool_calls[0].arguments;
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(
                     arguments.get("path").map(String::as_str),
@@ -301,26 +325,29 @@ mod tests {
         let request = ModelRequest {
             request_id: next_model_request_id(),
             model_name: "gpt-4o".to_string(),
-            messages: vec![
-                PromptMessage {
-                    message_id: "m1".to_string(),
-                    role: "system".to_string(),
-                    content: "You are an agent.".to_string(),
-                    source_segment_refs: vec![],
-                },
-                PromptMessage {
-                    message_id: "m2".to_string(),
-                    role: "user".to_string(),
-                    content: "Hello".to_string(),
-                    source_segment_refs: vec![],
-                },
-            ],
             prompt_token_estimate: 10,
             context_window: 128_000,
             max_output_tokens: Some(8192),
         };
 
-        let payload = build_payload(&request, "gpt-4o-mini");
+        let messages = vec![
+            PromptMessage {
+                message_id: "m1".to_string(),
+                role: "system".to_string(),
+                tool_call_id: None,
+                content: "You are an agent.".to_string(),
+                source_segment_refs: vec![],
+            },
+            PromptMessage {
+                message_id: "m2".to_string(),
+                role: "user".to_string(),
+                tool_call_id: None,
+                content: "Hello".to_string(),
+                source_segment_refs: vec![],
+            },
+        ];
+
+        let payload = build_payload(&request, "gpt-4o-mini", &messages);
         assert_eq!(payload["model"], "gpt-4o-mini");
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
         assert_eq!(payload["messages"][0]["role"], "system");
@@ -334,12 +361,6 @@ mod tests {
         let request = ModelRequest {
             request_id: next_model_request_id(),
             model_name: "openai:gpt-4o".to_string(),
-            messages: vec![PromptMessage {
-                message_id: "m1".to_string(),
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-                source_segment_refs: vec![],
-            }],
             prompt_token_estimate: 20,
             context_window: 128_000,
             max_output_tokens: None,

@@ -85,6 +85,7 @@ pub struct SelectedSegment {
     pub segment_id: String,
     pub source_id: String,
     pub layer: ContextLayer,
+    pub source_type: ContextSourceType,
     pub content: String,
     pub selection_reason: String,
     pub token_estimate: u32,
@@ -113,6 +114,8 @@ pub struct PromptMessage {
     pub role: String,
     pub content: String,
     pub source_segment_refs: Vec<String>,
+    /// Tool call correlation ID, set when `role` is "tool".
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +175,21 @@ pub struct ObservationSummary {
     pub content: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub context_window: u32,
+    pub reserved_output_tokens: u32,
+    pub supports_vision: bool,
+    pub supports_tool_role: bool,
+}
+
+impl ModelCapabilities {
+    pub fn input_budget(self) -> u32 {
+        self.context_window
+            .saturating_sub(self.reserved_output_tokens)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContextBudget {
     pub total_tokens: u32,
@@ -182,7 +200,9 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
-    pub fn from_total(total_tokens: u32) -> Self {
+    pub fn from_capabilities(caps: &ModelCapabilities) -> Self {
+        let total_tokens = caps.input_budget();
+        // Here we could dynamically adapt based on caps, but for now we retain the percentages
         Self {
             total_tokens,
             reserved_system_tokens: total_tokens * 15 / 100,
@@ -220,7 +240,7 @@ pub struct ContextBuildInput {
     pub policy_injections: Vec<String>,
     pub working_memory: WorkingMemory,
     pub working_set: WorkingSet,
-    pub token_budget: u32,
+    pub model_capabilities: ModelCapabilities,
     pub tool_descriptors: Vec<ToolInfo>,
 }
 
@@ -268,7 +288,7 @@ pub struct DefaultContextEngine;
 
 impl ContextEngine for DefaultContextEngine {
     fn build(&self, input: ContextBuildInput) -> ContextSnapshot {
-        let budget = ContextBudget::from_total(input.token_budget);
+        let budget = ContextBudget::from_capabilities(&input.model_capabilities);
         let mut compression_events = Vec::new();
         let mut sources = Vec::new();
 
@@ -484,6 +504,7 @@ impl ContextEngine for DefaultContextEngine {
                 segment_id: next_segment_id(),
                 source_id: source.source_id.clone(),
                 layer: source.layer,
+                source_type: source.source_type,
                 content: source.content.clone(),
                 selection_reason: selection_reason(source.source_type).to_string(),
                 token_estimate: estimate_tokens(&source.content),
@@ -550,10 +571,14 @@ fn assemble_messages(
 ) -> Vec<PromptMessage> {
     let mut system_segments = Vec::new();
     let mut user_segments = Vec::new();
+    let mut tool_segments = Vec::new();
 
     for segment in selected_segments {
         match segment.layer {
             ContextLayer::GoalAnchor => system_segments.push(segment),
+            ContextLayer::EvidenceBuffer if segment.source_type == ContextSourceType::ToolObservation => {
+                tool_segments.push(segment);
+            }
             ContextLayer::WorkingSet
             | ContextLayer::EvidenceBuffer
             | ContextLayer::ArchiveSummary => user_segments.push(segment),
@@ -565,6 +590,7 @@ fn assemble_messages(
         messages.push(PromptMessage {
             message_id: next_message_id(),
             role: "system".to_string(),
+            tool_call_id: None,
             content: system_segments
                 .iter()
                 .map(|segment| segment.content.as_str())
@@ -574,6 +600,17 @@ fn assemble_messages(
                 .iter()
                 .map(|segment| segment.segment_id.clone())
                 .collect(),
+        });
+    }
+
+    // Tool-role messages: recent observation content as structured tool results
+    for segment in &tool_segments {
+        messages.push(PromptMessage {
+            message_id: next_message_id(),
+            role: "tool".to_string(),
+            tool_call_id: Some(format!("tool-call-{}", segment.segment_id)),
+            content: segment.content.clone(),
+            source_segment_refs: vec![segment.segment_id.clone()],
         });
     }
 
@@ -591,6 +628,7 @@ fn assemble_messages(
         messages.push(PromptMessage {
             message_id: next_message_id(),
             role: "user".to_string(),
+            tool_call_id: None,
             content: format!(
                 "## Prompt-Loaded Context\nThese sections are the only non-system context currently loaded into the prompt.\n\n### Layer Balance\n{}\n\n### Compression Events\n{}\n\n{}",
                 layer_header,
@@ -619,6 +657,66 @@ fn truncate_with_budget(
         return content.to_string();
     }
 
+    // Phase 1: paragraph boundary first (split by double newline)
+    let mut para_acc = String::new();
+    let mut para_tokens = 0u32;
+    for para in content.split("\n\n") {
+        let para_est = estimate_tokens(para);
+        let with_sep = if para_acc.is_empty() { para_est } else { para_est + 1 };
+        if para_tokens + with_sep > token_budget && !para_acc.is_empty() {
+            break;
+        }
+        if !para_acc.is_empty() {
+            para_acc.push_str("\n\n");
+        }
+        para_acc.push_str(para);
+        para_tokens += with_sep;
+    }
+    if !para_acc.is_empty() && para_acc.len() < content.len() {
+        let saved = content.len() - para_acc.len();
+        compression_events.push(CompressionEvent {
+            event_id: next_compression_id(),
+            source_id: label.to_string(),
+            layer,
+            strategy: CompressionStrategy::Truncate,
+            reason: format!(
+                "estimated_tokens={} exceeds_budget={} truncated_at_paragraph saved={}",
+                estimated, token_budget, saved
+            ),
+        });
+        return para_acc;
+    }
+
+    // Phase 1 fallback: line boundary (split by single newline)
+    let mut line_acc = String::new();
+    let mut line_tokens = 0u32;
+    for line in content.split('\n') {
+        let line_est = estimate_tokens(line);
+        let with_sep = if line_acc.is_empty() { line_est } else { line_est + 1 };
+        if line_tokens + with_sep > token_budget && !line_acc.is_empty() {
+            break;
+        }
+        if !line_acc.is_empty() {
+            line_acc.push('\n');
+        }
+        line_acc.push_str(line);
+        line_tokens += with_sep;
+    }
+    if !line_acc.is_empty() && line_acc.len() < content.len() {
+        compression_events.push(CompressionEvent {
+            event_id: next_compression_id(),
+            source_id: label.to_string(),
+            layer,
+            strategy: CompressionStrategy::Truncate,
+            reason: format!(
+                "estimated_tokens={} exceeds_budget={} truncated_at_line",
+                estimated, token_budget
+            ),
+        });
+        return line_acc;
+    }
+
+    // Last resort: character boundary (should rarely happen)
     let char_budget = (token_budget as usize).saturating_mul(4);
     let truncated = content.chars().take(char_budget).collect::<String>();
     compression_events.push(CompressionEvent {
@@ -627,7 +725,7 @@ fn truncate_with_budget(
         layer,
         strategy: CompressionStrategy::Truncate,
         reason: format!(
-            "estimated_tokens={} exceeds_budget={}",
+            "estimated_tokens={} exceeds_budget={} truncated_at_char",
             estimated, token_budget
         ),
     });
@@ -739,7 +837,7 @@ fn next_compression_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextBuildInput, ContextEngine, ContextLayer, DefaultContextEngine, ObservationSummary,
+        ContextBuildInput, ContextEngine, ContextLayer, DefaultContextEngine, ModelCapabilities, ObservationSummary,
         WorkingMemory, WorkingSet,
     };
 
@@ -772,7 +870,12 @@ mod tests {
                 recent_evidence: vec!["read_file => runtime source".to_string()],
                 open_questions: vec!["which tool to call next".to_string()],
             },
-            token_budget: 128,
+            model_capabilities: crate::ModelCapabilities {
+                context_window: 128,
+                reserved_output_tokens: 0,
+                supports_vision: false,
+                supports_tool_role: false,
+            },
             tool_descriptors: vec![],
         });
 
@@ -820,7 +923,7 @@ mod tests {
                 recent_evidence: vec![],
                 open_questions: vec![],
             },
-            token_budget: 1024,
+            model_capabilities: ModelCapabilities { context_window: 1024, reserved_output_tokens: 256, supports_vision: false, supports_tool_role: false },
             tool_descriptors: vec![
                 super::ToolInfo {
                     name: "read_file".to_string(),
@@ -872,7 +975,7 @@ mod tests {
                 recent_evidence: vec!["pending_tool_call: none".to_string()],
                 open_questions: vec!["what is loaded".to_string()],
             },
-            token_budget: 512,
+            model_capabilities: ModelCapabilities { context_window: 512, reserved_output_tokens: 128, supports_vision: false, supports_tool_role: false },
             tool_descriptors: vec![],
         });
 
@@ -938,7 +1041,7 @@ mod tests {
                 recent_evidence: vec!["search_content => obs-2".to_string()],
                 open_questions: vec!["what changed last round".to_string()],
             },
-            token_budget: 512,
+            model_capabilities: ModelCapabilities { context_window: 512, reserved_output_tokens: 128, supports_vision: false, supports_tool_role: false },
             tool_descriptors: vec![],
         });
 
@@ -956,4 +1059,104 @@ mod tests {
                 .any(|event| event.strategy == super::CompressionStrategy::MergeSummary)
         );
     }
+
+
+    #[test]
+    fn truncation_respects_paragraph_boundary() {
+        // Content with 3 paragraphs, budget only fits 2
+        let text = "first paragraph\n\nsecond paragraph\n\nthird paragraph with more content\n";
+        let mut events = Vec::new();
+        let result = super::truncate_with_budget(
+            text, 8, &mut events, "test", super::ContextLayer::EvidenceBuffer
+        );
+        // Should not cut mid-paragraph
+assert!(!result.contains("third paragraph"), "should drop last paragraph entirely");
+        assert!(result.contains("first paragraph"), "should keep first paragraph");
+        assert!(result.contains("second paragraph"), "should keep second paragraph");
+    }
+
+    #[test]
+    fn truncation_falls_back_to_line_boundary() {
+        // Single long paragraph with lines, budget too small
+        let text = "short line\nanother line\nmore\nfinal\n";
+        let mut events = Vec::new();
+        let result = super::truncate_with_budget(
+            text, 2, &mut events, "test", super::ContextLayer::EvidenceBuffer
+        );
+        // Should drop last lines, not cut mid-line
+        assert!(!result.contains("final"), "should drop last line");
+    }
+
+    #[test]
+    fn old_observations_drop_content_keep_only_summary() {
+        // Verify that the archive summary for old observations
+        // only contains tool_name: summary, not full content
+        let snapshot = super::DefaultContextEngine.build(super::ContextBuildInput {
+            session_id: "session-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            loop_index: 5,
+            task_input: "test".to_string(),
+            session_history: vec![],
+            tool_observations: vec![
+                super::ObservationSummary {
+                    tool_name: "read_file".to_string(),
+                    summary: "read Cargo.toml".to_string(),
+                    content: Some("very long file content that should not appear in summary...".to_string()),
+                },
+                super::ObservationSummary {
+                    tool_name: "read_file".to_string(),
+                    summary: "read lib.rs".to_string(),
+                    content: Some("another long file content...".to_string()),
+                },
+                super::ObservationSummary {
+                    tool_name: "search_files".to_string(),
+                    summary: "found 5 files".to_string(),
+                    content: Some("file1\nfile2\nfile3\nfile4\nfile5".to_string()),
+                },
+            ],
+            system_prompt: "agent".to_string(),
+            runtime_contract: vec![],
+            policy_injections: vec![],
+            working_memory: super::WorkingMemory {
+                current_goal: "test".to_string(),
+                completed_items: vec![],
+                pending_items: vec![],
+            },
+            working_set: super::WorkingSet {
+                active_files: vec![],
+                focus_notes: vec![],
+                active_subtasks: vec![],
+                recent_evidence: vec![],
+                open_questions: vec![],
+            },
+            model_capabilities: super::ModelCapabilities {
+                context_window: 32000,
+                reserved_output_tokens: 4000,
+                supports_vision: false,
+                supports_tool_role: true,
+            },
+            tool_descriptors: vec![],
+        });
+
+        // Recent 2 observations should have full content
+        for msg in &snapshot.prompt_messages {
+            if msg.role == "tool" {
+                // Recent tools have full content
+                assert!(msg.content.contains("very long") || msg.content.contains("another long")
+                    || msg.content.contains("file5"), "recent tool should include content");
+            }
+        }
+
+        // Archive summary should NOT contain full content
+        let archive = snapshot.sources.iter()
+            .find(|s| s.label == "older_observation_summary");
+        if let Some(archive) = archive {
+            assert!(!archive.content.contains("very long file content"),
+                "archive should not contain full observation content");
+            // But it should contain the summary
+            assert!(archive.content.contains("read_file: read Cargo.toml"),
+                "archive should contain summary");
+        }
+    }
+
 }

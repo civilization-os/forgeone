@@ -142,7 +142,8 @@ const translations = {
     brandSub: '开放智能代理运行时',
     newAgentBtn: '新建任务',
     tabChat: '聊天',
-    tabProject: '项目',
+    tabExplorer: '资源管理器',
+    tabProject: '工作区设置',
     tabModel: '模型',
     tabMcp: 'MCP 服务',
     tabSkill: '技能插件',
@@ -293,6 +294,7 @@ const translations = {
     brandSub: 'Open Agent Runtime',
     newAgentBtn: 'New Task',
     tabChat: 'Chat',
+    tabExplorer: 'Explorer',
     tabProject: 'Project',
     tabModel: 'Model',
     tabMcp: 'MCP',
@@ -1606,6 +1608,7 @@ export default function App() {
 
   // 全局偏好设置弹窗状态
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  
   const [httpProxy, setHttpProxy] = useState('http://127.0.0.1:7890');
   const [socksProxy, setSocksProxy] = useState('');
   const [clearCacheOnExit, setClearCacheOnExit] = useState(false);
@@ -1662,6 +1665,11 @@ export default function App() {
   const latestAgentMessage = [...messages].reverse().find(message => message.sender === 'agent') || null;
 
   // 项目面板状态
+  const [explorerTree, setExplorerTree] = useState<any[]>([]);
+  const [explorerOpenedFiles, setExplorerOpenedFiles] = useState<{path: string, name: string, content: string, isDirty: boolean}[]>([]);
+  const [explorerActiveFile, setExplorerActiveFile] = useState<string | null>(null);
+  const [explorerWorkspacePath, setExplorerWorkspacePath] = useState<string>('');
+
   const [projectRoot, setProjectRoot] = useState('D:/project/forgeone');
   const [permissions, setPermissions] = useState({
     read: true,
@@ -2225,7 +2233,7 @@ export default function App() {
       ...m,
       pendingApproval: null,
       status: 'running',
-      content: lang === 'zh' ? '安全审批已批准。正在恢复 Agent 运行环境并恢复自治执行循环...' : 'Authorization granted. Restoring Agent Sandbox and resuming loop...',
+      content: lang === 'zh' ? '安全授权已批准。正在恢复 Agent 沙箱并恢复执行循环...' : 'Authorization granted. Restoring Agent Sandbox and resuming loop...',
       streaming: true,
       runStartedAt: Date.now(),
       runCompletedAt: undefined,
@@ -2268,7 +2276,7 @@ export default function App() {
       } : m));
       loadTraces();
     } catch (err: any) {
-      alert(`${lang === 'zh' ? '拒绝并清理会话失败' : 'Failed to prune session'}: ${err.message || err}`);
+      alert(`${lang === 'zh' ? '拒绝授权并终止会话失败' : 'Failed to prune session'}: ${err.message || err}`);
     }
   };
 
@@ -2516,7 +2524,7 @@ export default function App() {
           : server.lastHandshake,
         lastError: nextStatus === 'connected' ? undefined : server.lastError,
         lastTrace: nextStatus === 'connected'
-          ? (lang === 'zh' ? '手动启动后完成 initialize 与 capability discovery' : 'Initialized and discovered capabilities after manual start')
+          ? (lang === 'zh' ? '手动启动后成功初始化并发现能力' : 'Initialized and discovered capabilities after manual start')
           : server.lastTrace,
       };
     }));
@@ -2719,7 +2727,7 @@ export default function App() {
 
       modelsList = modelsList.filter(Boolean).map(String);
       if (modelsList.length === 0) {
-        throw new Error(lang === 'zh' ? '未检测到可用模型列表，请确认地址与密钥是否正确。' : 'No models detected in the response.');
+        throw new Error(lang === 'zh' ? '未在响应中探测到任何模型，请确认地址与密钥是否正确。' : 'No models detected in the response.');
       }
       setFetchedModels(modelsList);
     } catch (err: any) {
@@ -2842,6 +2850,7 @@ export default function App() {
         </div>
 
         <nav className="sidebar-content custom-scrollbar">
+          
           <div 
             className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`}
             onClick={() => setActiveTab('chat')}
@@ -2857,6 +2866,7 @@ export default function App() {
             <Icon name="folder_open" className="icon" style={{ marginRight: '8px' }} />
             <span>{t.tabProject}</span>
           </div>
+
 
           <div 
             className={`nav-item ${activeTab === 'model' ? 'active' : ''}`}
@@ -3015,7 +3025,7 @@ export default function App() {
                       <div className="task-meta">
                         <span style={{ fontFamily: 'var(--font-mono)' }}>{item.turnCount} turns</span>
                         <span style={{ color: item.latestStatus === 'completed' ? 'var(--success)' : 'var(--warning)' }}>
-                          {item.status === 'completed' ? (lang === 'zh' ? '已完成' : 'Done') : (lang === 'zh' ? '挂起中' : 'Pending')}
+                          {item.status === 'completed' ? (lang === 'zh' ? '完成' : 'Done') : (lang === 'zh' ? '挂起' : 'Pending')}
                         </span>
                       </div>
                     </div>
@@ -3286,10 +3296,10 @@ export default function App() {
                     />
                     <div className="chat-input-toolbar-row">
                       <div className="chat-toolbar-left">
-                        <button className="toolbar-action-btn" type="button" title={lang === 'zh' ? '添加文件上下文' : 'Attach File context'}>
+                        <button className="toolbar-action-btn" type="button" title={lang === 'zh' ? '附带文件上下文' : 'Attach File context'}>
                           <Icon name="attach_file" />
                         </button>
-                        <button className="toolbar-action-btn" type="button" title={lang === 'zh' ? '插入代码块' : 'Insert Code Object'}>
+                        <button className="toolbar-action-btn" type="button" title={lang === 'zh' ? '插入代码段' : 'Insert Code Object'}>
                           <Icon name="data_object" />
                         </button>
                         <div className="toolbar-divider"></div>
@@ -3340,7 +3350,7 @@ export default function App() {
                                 }}
                               >
                                 <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--on-surface-variant)', padding: '6px 8px 4px', borderBottom: '1px solid var(--border-color)', marginBottom: '4px' }}>
-                                  {lang === 'zh' ? '快速切换当前模型' : 'Switch Active Model'}
+                                  {lang === 'zh' ? '快捷切换当前模型' : 'Switch Active Model'}
                                 </div>
                                 <div style={{ maxHeight: '200px', overflowY: 'auto' }} className="custom-scrollbar">
                                   {profiles.map((profile) => {
@@ -3405,147 +3415,222 @@ export default function App() {
           </div>
         )}
 
-        {/* 项目面板 */}
+        
+        
+        {/* 项目面板 (STITCH 3-column layout) */}
         {activeTab === 'project' && (
-          <div className="canvas">
-            <div className="canvas-container">
-              <div className="page-header">
-                <div>
-                  <h2 className="page-header-title">{t.projTitle}</h2>
-                  <p className="page-header-subtitle">{t.projSub}</p>
-                </div>
-                <button className="btn-primary" onClick={() => alert(lang === 'zh' ? '已触发文件夹选择' : 'Browse folder...')}>
-                  <Icon name="add_box" />
-                  {t.projNewBtn}
-                </button>
+          <div className="stitch-project-layout" style={{ display: 'flex', height: '100%', width: '100%', overflow: 'hidden' }}>
+            
+            {/* 左栏: 项目文件树 */}
+            <div className="stitch-left-panel" style={{ width: '260px', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface)' }}>
+              <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)' }}>
+                <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', fontWeight: 600, letterSpacing: '0.05em' }}>项目列表 (STITCH)</div>
               </div>
-
-              <div className="grid-bento">
-                {/* 活跃工作区设置 */}
-                <div className="card-bento bento-span-2">
-                  <div className="card-title-row">
-                    <Icon name="folder_managed" className="card-title-icon" style={{ marginRight: '6px' }} />
-                    <span className="card-title-text">{t.projActiveCard}</span>
+              <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '12px', color: 'var(--on-surface)' }}>项目文件</div>
+                
+                {explorerTree.length === 0 ? (
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '24px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--on-surface-variant)', marginBottom: '12px', textAlign: 'center' }}>该项目尚未关联本地目录</div>
+                    <button 
+                      className="btn-secondary"
+                      style={{ fontSize: '12px', padding: '6px 12px', borderRadius: '4px' }}
+                      onClick={async () => {
+                        const dirPath = await (window as any).forgeone.selectDir();
+                        if (dirPath) {
+                          setExplorerWorkspacePath(dirPath);
+                          try {
+                            const tree = await (window as any).forgeone.readDir(dirPath);
+                            setExplorerTree(tree);
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }
+                      }}
+                    >
+                      关联本地目录
+                    </button>
                   </div>
+                ) : (
+                  <div className="file-tree-nodes custom-scrollbar" style={{ flex: 1, overflowY: 'auto' }}>
+                    {explorerTree.map((item, idx) => (
+                      <div 
+                        key={idx} 
+                        className={`file-tree-item ${!item.isDirectory ? 'file' : 'directory'}`}
+                        style={{ padding: '6px 8px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                        onClick={async () => {
+                          if (!item.isDirectory) {
+                            try {
+                              const content = await (window as any).forgeone.readFile(item.path);
+                              const existing = explorerOpenedFiles.find(f => f.path === item.path);
+                              if (!existing) {
+                                setExplorerOpenedFiles([...explorerOpenedFiles, { path: item.path, name: item.name, content, isDirty: false }]);
+                              }
+                              setExplorerActiveFile(item.path);
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }
+                        }}
+                      >
+                        <Icon name={item.isDirectory ? 'folder' : 'description'} style={{ fontSize: '14px', color: 'var(--on-surface-variant)' }} />
+                        <span style={{ fontSize: '12px', color: 'var(--on-surface)' }}>{item.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
 
-                  <div className="form-group">
-                    <label className="form-label">{t.projPathLabel}</label>
-                    <div style={{ display: 'flex', gap: '12px' }}>
-                      <input 
-                        type="text" 
-                        className="form-input-text" 
-                        value={projectRoot} 
-                        onChange={(e) => setProjectRoot(e.target.value)}
+            {/* 中栏: 代码编辑器 */}
+            <div className="stitch-middle-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface-lowest)' }}>
+              {explorerOpenedFiles.length > 0 ? (
+                <>
+                  <div className="editor-tab-bar custom-scrollbar" style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--surface-low)', overflowX: 'auto' }}>
+                    {explorerOpenedFiles.map(file => (
+                      <div 
+                        key={file.path} 
+                        className={`editor-tab ${explorerActiveFile === file.path ? 'active' : ''}`}
+                        style={{ 
+                          padding: '8px 16px', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '8px', 
+                          cursor: 'pointer',
+                          backgroundColor: explorerActiveFile === file.path ? 'var(--surface-lowest)' : 'transparent',
+                          borderTop: explorerActiveFile === file.path ? '2px solid var(--primary-color)' : '2px solid transparent',
+                          borderRight: '1px solid var(--border-color)',
+                          fontSize: '12px'
+                        }}
+                        onClick={() => setExplorerActiveFile(file.path)}
+                      >
+                        <Icon name="description" style={{ fontSize: '14px', color: 'var(--on-surface-variant)' }} />
+                        <span style={{ color: explorerActiveFile === file.path ? 'var(--on-surface)' : 'var(--on-surface-variant)' }}>{file.name}</span>
+                        {file.isDirty && <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--primary-color)' }}></div>}
+                        <div
+                          style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const nextFiles = explorerOpenedFiles.filter(f => f.path !== file.path);
+                            setExplorerOpenedFiles(nextFiles);
+                            if (explorerActiveFile === file.path) {
+                              setExplorerActiveFile(nextFiles.length > 0 ? nextFiles[nextFiles.length - 1].path : null);
+                            }
+                          }}
+                        >
+                          <Icon 
+                            name="close" 
+                            style={{ fontSize: '14px', color: 'var(--on-surface-variant)', marginLeft: '4px' }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    {explorerActiveFile && (
+                      <textarea
+                        className="custom-scrollbar"
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          padding: '16px',
+                          border: 'none',
+                          resize: 'none',
+                          outline: 'none',
+                          backgroundColor: 'transparent',
+                          color: 'var(--on-surface)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: '13px',
+                          lineHeight: '1.5'
+                        }}
+                        value={explorerOpenedFiles.find(f => f.path === explorerActiveFile)?.content || ''}
+                        onChange={(e) => {
+                          const newContent = e.target.value;
+                          setExplorerOpenedFiles(files => files.map(f => f.path === explorerActiveFile ? { ...f, content: newContent, isDirty: true } : f));
+                        }}
+                        onKeyDown={async (e) => {
+                          if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                            e.preventDefault();
+                            const file = explorerOpenedFiles.find(f => f.path === explorerActiveFile);
+                            if (file) {
+                              await (window as any).forgeone.writeFile(file.path, file.content);
+                              setExplorerOpenedFiles(files => files.map(f => f.path === explorerActiveFile ? { ...f, isDirty: false } : f));
+                            }
+                          }
+                        }}
                       />
-                      <button className="btn-secondary" onClick={() => alert(lang === 'zh' ? '浏览本地路径' : 'Browse folder...')}>{t.projBrowseBtn}</button>
-                    </div>
+                    )}
                   </div>
+                </>
+              ) : (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--on-surface-variant)' }}>
+                  <Icon name="folder_open" style={{ fontSize: '48px', marginBottom: '16px', opacity: 0.5 }} />
+                  <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--on-surface)', marginBottom: '8px' }}>未选择文件</div>
+                  <div style={{ fontSize: '13px' }}>从左侧的文件树中选择一个代码文件进行预览或编辑</div>
+                </div>
+              )}
+            </div>
 
-                  <div className="form-group">
-                    <label className="form-label">{t.projPermissionLabel}</label>
-                    <div className="permissions-grid">
-                      <label className="permission-card">
-                        <input 
-                          type="checkbox" 
-                          checked={permissions.read}
-                          onChange={(e) => setPermissions({ ...permissions, read: e.target.checked })}
-                        />
-                        <div>
-                          <span className="permission-title">{t.projReadTitle}</span>
-                          <span className="permission-desc">{t.projReadDesc}</span>
-                        </div>
-                      </label>
-
-                      <label className="permission-card">
-                        <input 
-                          type="checkbox" 
-                          checked={permissions.write}
-                          onChange={(e) => setPermissions({ ...permissions, write: e.target.checked })}
-                        />
-                        <div>
-                          <span className="permission-title">{t.projWriteTitle}</span>
-                          <span className="permission-desc">{t.projWriteDesc}</span>
-                        </div>
-                      </label>
-
-                      <label className="permission-card">
-                        <input 
-                          type="checkbox" 
-                          checked={permissions.execute}
-                          onChange={(e) => setPermissions({ ...permissions, execute: e.target.checked })}
-                        />
-                        <div>
-                          <span className="permission-title">{t.projExecuteTitle}</span>
-                          <span className="permission-desc">{t.projExecuteDesc}</span>
-                        </div>
-                      </label>
-
-                      <label className="permission-card disabled">
-                        <input 
-                          type="checkbox" 
-                          disabled
-                          checked={permissions.delete}
-                          onChange={(e) => setPermissions({ ...permissions, delete: e.target.checked })}
-                        />
-                        <div>
-                          <span className="permission-title">{t.projDeleteTitle}</span>
-                          <span className="permission-desc">{t.projDeleteDesc}</span>
-                        </div>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '24px' }}>
-                    <button className="btn-primary" onClick={() => alert(lang === 'zh' ? '配置已成功保存！' : 'Saved!')}>{t.projSaveBtn}</button>
+            {/* 右栏: 项目 Agent 助手 */}
+            <div className="stitch-right-panel" style={{ width: '320px', borderLeft: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface)' }}>
+              <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Icon name="smart_toy" style={{ fontSize: '18px', color: 'var(--on-surface)' }} />
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)' }}>项目 Agent 助手</div>
+              </div>
+              <div className="agent-chat-history custom-scrollbar" style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', fontWeight: 600 }}>ForgeOne 核心智能体</div>
+                  <div style={{ backgroundColor: 'var(--surface-low)', padding: '12px', borderRadius: '8px', fontSize: '13px', color: 'var(--on-surface)', lineHeight: '1.5' }}>
+                    您好！我是项目助手。您可以向我提问关于当前工作区的任何问题，或者我可以帮您分析和重构当前打开的文件。
                   </div>
                 </div>
-
-                {/* 最近工作区列表 */}
-                <div className="card-bento">
-                  <div className="card-title-row">
-                    <Icon name="history" className="card-title-icon" style={{ marginRight: '6px' }} />
-                    <span className="card-title-text">{t.projHistoryTitle}</span>
-                  </div>
-
-                  <div className="list-rows-container">
-                    <div className="list-row-item">
-                      <div className="list-row-item-left">
-                        <Icon name="folder" className="list-row-icon" />
-                        <div>
-                          <span className="list-row-title">ForgeOne Core</span>
-                          <span className="list-row-subtitle">~/projects/forgeone</span>
-                        </div>
-                      </div>
-                      <span className="status-pill success">{t.projStatusActive}</span>
-                    </div>
-
-                    <div className="list-row-item" style={{ cursor: 'pointer' }} onClick={() => setProjectRoot('~/projects/etl-pipe')}>
-                      <div className="list-row-item-left">
-                        <Icon name="folder" className="list-row-icon" />
-                        <div>
-                          <span className="list-row-title">Data Pipeline</span>
-                          <span className="list-row-subtitle">~/projects/etl-pipe</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="list-row-item" style={{ cursor: 'pointer' }} onClick={() => setProjectRoot('~/workspace/frontend')}>
-                      <div className="list-row-item-left">
-                        <Icon name="folder" className="list-row-icon" />
-                        <div>
-                          <span className="list-row-title">React WebApp</span>
-                          <span className="list-row-subtitle">~/workspace/frontend</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+              </div>
+              <div style={{ padding: '16px', borderTop: '1px solid var(--border-color)' }}>
+                <div style={{ position: 'relative' }}>
+                  <textarea 
+                    placeholder="询问关于此项目的问题..." 
+                    className="custom-scrollbar"
+                    style={{ 
+                      width: '100%', 
+                      padding: '12px', 
+                      paddingRight: '40px',
+                      borderRadius: '8px', 
+                      border: '1px solid var(--border-color)', 
+                      backgroundColor: 'var(--surface-lowest)',
+                      color: 'var(--on-surface)',
+                      fontSize: '13px',
+                      resize: 'none',
+                      height: '80px',
+                      outline: 'none'
+                    }}
+                  />
+                  <button 
+                    style={{ 
+                      position: 'absolute', 
+                      right: '8px', 
+                      bottom: '8px', 
+                      width: '28px', 
+                      height: '28px', 
+                      borderRadius: '4px', 
+                      backgroundColor: 'var(--on-surface)', 
+                      color: 'var(--surface-lowest)',
+                      border: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <Icon name="arrow_upward" style={{ fontSize: '16px' }} />
+                  </button>
                 </div>
               </div>
             </div>
+            
           </div>
         )}
 
-        {/* 模型面板 */}
+{/* 模型面板 */}
         {activeTab === 'model' && (
           <div className="canvas">
             <div className="canvas-container">
@@ -3557,7 +3642,7 @@ export default function App() {
                     <div>
                       <h2 className="page-header-title">{lang === 'zh' ? '模型管理' : 'Model Management'}</h2>
                       <p className="page-header-subtitle">
-                        {lang === 'zh' ? '配置、测试并管理自治智能体运行时所连接的大语言模型通道。' : 'Configure, test, and manage the language model channels connected to the Agent Runtime.'}
+                        {lang === 'zh' ? '配置、测试和管理与 Agent Runtime 连接的大语言模型通道。' : 'Configure, test, and manage the language model channels connected to the Agent Runtime.'}
                       </p>
                     </div>
                     <button className="btn-primary" onClick={handleStartNew}>
@@ -3660,7 +3745,7 @@ export default function App() {
                                 ) : (
                                   <>
                                     <Icon name="link" style={{ fontSize: '14px' }} />
-                                    <span>{lang === 'zh' ? '连接检测' : 'Test Connection'}</span>
+                                    <span>{lang === 'zh' ? '测试连接' : 'Test Connection'}</span>
                                   </>
                                 )}
                               </button>
@@ -3700,7 +3785,7 @@ export default function App() {
                         {editingProfileId === 'new' ? (lang === 'zh' ? '添加模型配置' : 'Add Model Configuration') : (lang === 'zh' ? '编辑模型配置' : 'Edit Model Configuration')}
                       </h2>
                       <p className="page-header-subtitle">
-                        {lang === 'zh' ? '配置大模型底座接入参数、安全网络代理以及独立推理超参数。' : 'Configure LLM integration parameters, proxy settings, and hyperparameters.'}
+                        {lang === 'zh' ? '配置大语言模型集成参数、代理设置与超参数。' : 'Configure LLM integration parameters, proxy settings, and hyperparameters.'}
                       </p>
                     </div>
                     <div style={{ display: 'flex', gap: '12px' }}>
@@ -3919,7 +4004,7 @@ export default function App() {
                               </select>
                             </div>
                             <div>
-                              <label className="form-label">{lang === 'zh' ? '提供方名称' : 'Provider Name'}</label>
+                              <label className="form-label">{lang === 'zh' ? '提供商名称' : 'Provider Name'}</label>
                               <input 
                                 type="text" 
                                 className="form-input-text"
@@ -3946,7 +4031,7 @@ export default function App() {
                             <input 
                               type="password" 
                               className="form-input-text"
-                              placeholder={lang === 'zh' ? '若本地部署无 Key 可留空' : 'Leave empty if no auth key required'}
+                              placeholder={lang === 'zh' ? '如果不需要认证密钥，请留空' : 'Leave empty if no auth key required'}
                               value={formApiKey}
                               onChange={(e) => setFormApiKey(e.target.value)}
                             />
@@ -3971,7 +4056,7 @@ export default function App() {
                                 disabled={isFetchingModels}
                               >
                                 <Icon name={isFetchingModels ? 'sync' : 'search'} style={{ animation: isFetchingModels ? 'spin 1.5s linear infinite' : 'none' }} />
-                                <span>{lang === 'zh' ? '检测模型' : 'Detect Models'}</span>
+                                <span>{lang === 'zh' ? '探测模型' : 'Detect Models'}</span>
                               </button>
                             </div>
 
@@ -4043,7 +4128,7 @@ export default function App() {
                               </select>
                             </div>
                             <div>
-                              <label className="form-label">{lang === 'zh' ? '提供方名称' : 'Provider Name'}</label>
+                              <label className="form-label">{lang === 'zh' ? '提供商名称' : 'Provider Name'}</label>
                               <input 
                                 type="text" 
                                 className="form-input-text"
@@ -4066,7 +4151,7 @@ export default function App() {
                           </div>
 
                           <div className="form-group">
-                            <label className="form-label">{lang === 'zh' ? 'Node.js 动态鉴权脚本代码' : 'Node.js Auth Code'}</label>
+                            <label className="form-label">{lang === 'zh' ? 'Node.js 动态鉴权脚本' : 'Node.js Auth Code'}</label>
                             <textarea
                               className="form-input-text"
                               style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', height: '140px', resize: 'vertical', backgroundColor: 'var(--surface-lowest)', border: '1px solid var(--border-color)', lineHeight: '1.5' }}
@@ -4094,7 +4179,7 @@ export default function App() {
                                 disabled={isFetchingModels}
                               >
                                 <Icon name={isFetchingModels ? 'sync' : 'search'} style={{ animation: isFetchingModels ? 'spin 1.5s linear infinite' : 'none' }} />
-                                <span>{lang === 'zh' ? '检测模型' : 'Detect Models'}</span>
+                                <span>{lang === 'zh' ? '探测模型' : 'Detect Models'}</span>
                               </button>
                             </div>
 
@@ -4253,7 +4338,7 @@ export default function App() {
 
                       <div className="form-group">
                         <label className="form-label">{lang === 'zh' ? '授权密钥 (API Key)' : 'API Key'}</label>
-                        <input type="text" className="form-input-text" readOnly value={profile.apiKey ? '••••••••••••••••••••••••' : 'No Key'} />
+                        <input type="text" className="form-input-text" readOnly value={profile.apiKey ? '••••••••' : 'No Key'} />
                       </div>
 
                       {profile.type === 'custom_script' && (
@@ -4269,7 +4354,7 @@ export default function App() {
                       </div>
 
                       <div className="card-bento" style={{ padding: '16px', gap: '12px' }}>
-                        <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--on-surface)' }}>{lang === 'zh' ? '超参数快照' : 'Hyperparameters'}</div>
+                        <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--on-surface)' }}>{lang === 'zh' ? '模型超参数' : 'Hyperparameters'}</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', fontSize: '12px', textAlign: 'center' }}>
                           <div style={{ backgroundColor: 'var(--surface-low)', padding: '6px', borderRadius: '4px' }}>
                             <div style={{ color: 'var(--on-surface-variant)', fontSize: '10px' }}>Temperature</div>
@@ -4355,7 +4440,7 @@ export default function App() {
 
               {mcpServers.length === 0 ? (
                 <div className="card-bento mcp-empty-text" style={{ padding: '24px' }}>
-                  {lang === 'zh' ? '当前还没有 MCP Server。点击右上角添加一个新的 Server。' : 'No MCP servers yet. Add a new server from the top-right action.'}
+                  {lang === 'zh' ? '当前没有已配置的 MCP 服务器。请点击右上角按钮添加。' : 'No MCP servers yet. Add a new server from the top-right action.'}
                 </div>
               ) : (
                 <div className="mcp-server-list-container">
@@ -4504,11 +4589,11 @@ export default function App() {
                           <div style={{ fontSize: '12px', color: 'var(--on-surface-variant)' }}>{server.description}</div>
                           {server.lastError ? (
                             <div className="mcp-error-box">
-                              <strong>{lang === 'zh' ? '最近错误' : 'Latest Error'}:</strong> {server.lastError}
+                              <strong>{lang === 'zh' ? '最后一次错误' : 'Latest Error'}:</strong> {server.lastError}
                             </div>
                           ) : (
                             <div className="mcp-success-box">
-                              {lang === 'zh' ? '最近一次 initialize 与 capability discovery 已完成。' : 'Latest initialize and capability discovery completed successfully.'}
+                              {lang === 'zh' ? '最后一次初始化与功能发现已顺利完成。' : 'Latest initialize and capability discovery completed successfully.'}
                             </div>
                           )}
                         </div>
@@ -4536,7 +4621,7 @@ export default function App() {
                                     ))}
                                   </div>
                                 ) : (
-                                  <div className="mcp-empty-text" style={{ fontSize: '11px' }}>{lang === 'zh' ? '未暴露此类能力' : 'No capabilities exposed'}</div>
+                                  <div className="mcp-empty-text" style={{ fontSize: '11px' }}>{lang === 'zh' ? '未暴露任何能力' : 'No capabilities exposed'}</div>
                                 )}
                               </div>
                             ))}
@@ -4550,7 +4635,7 @@ export default function App() {
                           </div>
                           <div className="mcp-health-stack">
                             <div className="mcp-health-line">
-                              <strong>{lang === 'zh' ? '最近握手' : 'Last Handshake'}:</strong> {server.lastHandshake}
+                              <strong>{lang === 'zh' ? '最后握手时间' : 'Last Handshake'}:</strong> {server.lastHandshake}
                             </div>
                             <div className="mcp-health-line">
                               <strong>{lang === 'zh' ? '最近 Trace' : 'Last Trace'}:</strong> {server.lastTrace}
@@ -4607,8 +4692,8 @@ export default function App() {
                   </h2>
                   <p className="page-header-subtitle">
                     {lang === 'zh' 
-                      ? '定义 Model Context Protocol 服务参数，连接您的 LLM 环境与外部能力。' 
-                      : 'Define Model Context Protocol server parameters to hook up external capabilities.'}
+                      ? '定义 Model Context Protocol 服务参数，连接您的 LLM 环境与外部能力。'
+    : 'Define Model Context Protocol server parameters to hook up external capabilities.'}
                   </p>
                 </div>
               </div>
@@ -4668,7 +4753,7 @@ export default function App() {
                           value={mcpFormArgs} 
                           onChange={(e) => setMcpFormArgs(e.target.value)}
                         />
-                        <p className="form-helper-text" style={{ marginTop: '8px' }}>{lang === 'zh' ? '输入该服务器的启动参数。' : 'Provide start arguments for this server.'}</p>
+                        <p className="form-helper-text" style={{ marginTop: '8px' }}>{lang === 'zh' ? '为该服务器提供启动参数。' : 'Provide start arguments for this server.'}</p>
                       </div>
                     </div>
 

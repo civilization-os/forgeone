@@ -5,6 +5,7 @@ const path = require("path");
 const http = require("http");
 const https = require("https");
 const child_process_1 = require("child_process");
+const fs = require("fs/promises");
 let mainWindow = null;
 let serverProcess = null;
 const pendingRequests = new Map();
@@ -219,4 +220,50 @@ electron_1.ipcMain.handle('window:get-state', (event) => {
     return {
         isMaximized: window?.isMaximized() ?? false,
     };
+});
+electron_1.ipcMain.handle('fs:select-dir', async (event) => {
+    const window = electron_1.BrowserWindow.fromWebContents(event.sender);
+    if (!window)
+        return null;
+    const result = await electron_1.dialog.showOpenDialog(window, {
+        properties: ['openDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+        return null;
+    }
+    return result.filePaths[0];
+});
+electron_1.ipcMain.handle('fs:read-dir', async (_, dirPath) => {
+    try {
+        const resolvedPath = path.resolve(dirPath);
+        const entries = await fs.readdir(resolvedPath, { withFileTypes: true });
+        return entries
+            .filter(entry => !['node_modules', '.git', 'dist', 'dist-electron', '.gemini', '.idea', '.vscode'].includes(entry.name))
+            .map(entry => ({
+            name: entry.name,
+            isDirectory: entry.isDirectory(),
+            path: path.join(resolvedPath, entry.name),
+        }));
+    }
+    catch (err) {
+        return { error: err.message };
+    }
+});
+electron_1.ipcMain.handle('fs:read-file', async (_, filePath) => {
+    try {
+        const content = await fs.readFile(path.resolve(filePath), 'utf-8');
+        return { content };
+    }
+    catch (err) {
+        return { error: err.message };
+    }
+});
+electron_1.ipcMain.handle('fs:write-file', async (_, filePath, content) => {
+    try {
+        await fs.writeFile(path.resolve(filePath), content, 'utf-8');
+        return { success: true };
+    }
+    catch (err) {
+        return { error: err.message };
+    }
 });

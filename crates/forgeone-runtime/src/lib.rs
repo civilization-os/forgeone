@@ -36,24 +36,38 @@ const SYSTEM_PROMPT: &str = "You are ForgeOne, an open coding agent runtime. You
 - For coding tasks, file operations, or when you need information from the repository: use the tool calling protocol below.
 - Always be helpful, friendly, and concise.
 - Always respond in the same language as the user's message.
+- Available tools are listed below in the 'Available Tools' section. Read their descriptions before calling them.
+- Your output should be concise but complete. There is no fixed length limit; adjust to the task.
+- Tasks may require multiple rounds of tool calls. Do not rush to finalize after a single result.
 
 ## Tool Calling Protocol
 
-When you need to read files, search code, or run commands, output a JSON object on its own line:
+When you need to read files, search code, or run commands, output a JSON object on its own line. You may call multiple tools in a single response by outputting multiple JSON objects, one per line:
 
 {\"tool\": \"<tool_name>\", \"arguments\": {\"<arg_name>\": \"<arg_value>\"}}
+{\"tool\": \"<tool_name2>\", \"arguments\": {\"<arg_name2>\": \"<arg_value2>\"}}
 
-Example:
-{\"tool\": \"read_file\", \"arguments\": {\"path\": \"Cargo.toml\"}}
+Examples:
+- Read a file:        {\"tool\": \"read_file\", \"arguments\": {\"path\": \"Cargo.toml\"}}
+- Search code:        {\"tool\": \"search_content\", \"arguments\": {\"pattern\": \"fn main\", \"path\": \"src/\"}}
+- Find files:         {\"tool\": \"glob\", \"arguments\": {\"pattern\": \"**/*.rs\"}}
+- Edit a file:        {\"tool\": \"edit_file\", \"arguments\": {\"path\": \"src/main.rs\", \"search\": \"old text\", \"replace\": \"new text\"}}
+- Compare files:      {\"tool\": \"diff\", \"arguments\": {\"path_a\": \"old.rs\", \"path_b\": \"new.rs\"}}
+- Run shell command:  {\"tool\": \"shell\", \"arguments\": {\"command\": \"cargo test\"}}
+- Git operations:     {\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}
+
+## Tool Output
+
+Tool results are provided as structured messages with role \"tool\". Read them carefully. If a tool returns a large amount of data, only the most recent portion may be shown. You can call the tool again with more specific arguments if needed.
 
 ## Tool Usage Rules
 
 1. Only call a tool when you genuinely lack information needed to complete the task.
 2. For conversational messages (greetings, questions you can answer from knowledge), respond directly — no tools needed.
-3. After receiving a tool result, analyze it immediately and produce your answer in plain text.
-4. NEVER call the same tool twice with the same arguments.
-5. If a tool call is denied, answer as best you can with what you already know.
-6. When done, output your final answer as plain text — do NOT include any JSON.";
+3. Tool results are fed into subsequent rounds. You may need multiple rounds of tool calls to fully understand the codebase before producing a final answer.
+4. NEVER call the same tool twice with the same arguments. Reuse the prior observation instead.
+5. If a tool call is denied or fails, answer as best you can with what you already know.
+6. When the task is complete, output your final answer as plain text — do NOT include any JSON.";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -231,6 +245,7 @@ pub struct RuntimeState {
     pub observations: Vec<Observation>,
     pub policy_decisions: Vec<PolicyRecord>,
     pub pending_approval: Option<PendingApproval>,
+    pub compression_summary: Option<String>,
     pub budget_usage: BudgetUsage,
     pub stop_reason: Option<StopReason>,
 }
@@ -299,6 +314,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             pending_approval: None,
             budget_usage: BudgetUsage::default(),
             stop_reason: None,
+            compression_summary: None,
         };
         let active_mcp_clients = self.init_mcp_clients(&session.config);
         let final_response = self.run_agent_loop(&session, &mut state, &mut trace, 1, &active_mcp_clients);
@@ -409,6 +425,7 @@ impl<S: SessionStore> RuntimeCore<S> {
                 tool_call_count: record.tool_call_count,
             },
             stop_reason: None,
+            compression_summary: None,
         };
 
         trace.push(TraceEvent::new(
@@ -582,6 +599,18 @@ impl<S: SessionStore> RuntimeCore<S> {
             state.active_context_snapshot = Some(self.build_context_snapshot(state, session, active_mcp_clients));
             self.emit_context_built(trace, state);
 
+            // Phase 3: model-based summary when compression occurs
+            let has_merge = state.active_context_snapshot.as_ref()
+                .map(|s| {
+                    use forgeone_context::CompressionStrategy;
+                    s.compression_events.iter().any(|e| e.strategy == CompressionStrategy::MergeSummary)
+                })
+                .unwrap_or(false);
+            if has_merge && state.compression_summary.is_none() {
+                let snap = state.active_context_snapshot.clone().unwrap();
+                self.maybe_summarize_compression(state, session, trace, &snap);
+            }
+
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ModelRequest));
             state.active_model_request = Some(self.build_model_request(state, &session.config));
             state.last_model_response = Some(self.request_model(state));
@@ -589,14 +618,31 @@ impl<S: SessionStore> RuntimeCore<S> {
             self.emit_model_responded(trace, state);
 
             self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolDecision));
-            state.active_tool_call = self.decide_tool_call(state);
-            let mut duplicate_tool_call_blocked = false;
-            if let Some(request) = state.active_tool_call.clone() {
-                if self.is_repeated_tool_call(state, &request) {
+            let pending_calls = self.decide_tool_call(state);
+
+            if pending_calls.is_empty() {
+                if final_response.is_none() {
+                    final_response = self.extract_final_response(state);
+                }
+                if final_response.is_some() {
+                    state.stop_reason = Some(StopReason::FinalResponse);
+                }
+                self.emit_tool_decision(trace, state);
+                self.emit_policy_checked(trace, state);
+                self.complete_state_update(trace, state);
+                break;
+            }
+
+            let mut all_success = true;
+            for tool_call in &pending_calls {
+                state.active_tool_call = Some(tool_call.clone());
+
+                // Check for repeated tool call
+                if self.is_repeated_tool_call(state, tool_call) {
                     let detail = format!(
                         "tool={} arguments={} repeats the most recent tool call",
-                        request.tool_name,
-                        summarize_tool_arguments(&request.arguments)
+                        tool_call.tool_name,
+                        summarize_tool_arguments(&tool_call.arguments)
                     );
                     state.policy_decisions.push(PolicyRecord {
                         scope: "tool_call".to_string(),
@@ -604,56 +650,34 @@ impl<S: SessionStore> RuntimeCore<S> {
                         detail: detail.clone(),
                     });
                     state.observations.push(Observation {
-                        tool_name: request.tool_name.clone(),
+                        tool_name: tool_call.tool_name.clone(),
                         summary: format!(
                             "tool={} status=blocked reason=repeated_tool_call",
-                            request.tool_name
+                            tool_call.tool_name
                         ),
                         content: Some(detail.clone()),
                     });
-                    state.last_tool_result = Some(ToolCallResult {
-                        call_id: request.call_id.clone(),
-                        status: forgeone_tools::ToolCallStatus::PermissionDenied,
-                        structured_output: HashMap::from([
-                            ("reason".to_string(), "repeated_tool_call".to_string()),
-                            (
-                                "detail".to_string(),
-                                "Reuse the prior observation or choose another tool before retrying."
-                                    .to_string(),
-                            ),
-                        ]),
-                        error: Some(detail.clone()),
-                        completed_at_ms: now_ms(),
-                    });
                     state.active_tool_call = None;
-                    duplicate_tool_call_blocked = true;
-                }
-            }
-            if state.active_tool_call.is_none() {
-                if !duplicate_tool_call_blocked && final_response.is_none() {
-                    final_response = self.extract_final_response(state);
-                }
-                if !duplicate_tool_call_blocked {
-                    state.stop_reason = Some(StopReason::FinalResponse);
-                }
-            }
-            self.emit_tool_decision(trace, state);
-
-            if state.active_tool_call.is_none() {
-                self.emit_policy_checked(trace, state);
-                self.complete_state_update(trace, state);
-                if duplicate_tool_call_blocked {
                     continue;
                 }
-                break;
+
+                self.emit_tool_decision(trace, state);
+                self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolExecution));
+                let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy), active_mcp_clients);
+                self.emit_policy_checked(trace, state);
+                self.emit_tool_completed(trace, state);
+
+                if matches!(execution_outcome, ToolExecutionOutcome::WaitingApproval) {
+                    all_success = false;
+                    break;
+                }
             }
 
-            self.transition(state, RuntimeStatus::Running, Some(LoopStep::ToolExecution));
-            let execution_outcome = self.execute_tool_call(state, Some(&session.config.policy), active_mcp_clients);
-            self.emit_policy_checked(trace, state);
-            self.emit_tool_completed(trace, state);
+            if all_success {
+                state.active_tool_call = None;
+            }
 
-            if matches!(execution_outcome, ToolExecutionOutcome::WaitingApproval) {
+            if !all_success {
                 break;
             }
 
@@ -856,7 +880,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             .collect();
         let working_set = self.build_working_set(state);
         let model_capabilities = self.model_capabilities_for(&session.config.model_name);
-        let context_token_budget = std::cmp::min(
+        let _context_token_budget = std::cmp::min(
             session.config.token_budget / 2,
             model_capabilities.input_budget() / 2,
         )
@@ -873,9 +897,117 @@ impl<S: SessionStore> RuntimeCore<S> {
             policy_injections: self.build_policy_injections(state),
             working_memory: self.build_working_memory(state, session),
             working_set: working_set.clone(),
-            token_budget: context_token_budget,
+            model_capabilities: self.model_capabilities_for(&session.config.model_name),
             tool_descriptors: self.select_tool_descriptors(state, &working_set, tool_info),
         })
+    }
+
+    fn maybe_summarize_compression(
+        &self,
+        state: &mut RuntimeState,
+        session: &Session,
+        trace: &mut InMemoryTraceStore,
+        snapshot: &ContextSnapshot,
+    ) {
+        use forgeone_context::CompressionStrategy;
+        let has_merge = snapshot.compression_events.iter().any(|e| e.strategy == CompressionStrategy::MergeSummary);
+        if !has_merge || state.compression_summary.is_some() {
+            return;
+        }
+
+        // Get task info for context
+        let task_input = &session.task.input;
+        let arch_segments: Vec<&str> = snapshot.selected_segments.iter()
+            .filter(|s| s.layer == forgeone_context::ContextLayer::ArchiveSummary)
+            .map(|s| s.content.as_str())
+            .collect();
+
+        // Build a summarization prompt
+        let compressed_content = if arch_segments.is_empty() {
+            "Observations and history were compressed due to token budget limits.".to_string()
+        } else {
+            arch_segments.join("\n---\n")
+        };
+        let summary_prompt = format!(
+            "Task: {}\n\nThe following context segments have been compressed. Please produce a concise 1-2 sentence summary of what information was contained in them, so the agent can continue working without losing context.\n\nCompressed content:\n{}",
+            task_input, compressed_content
+        );
+
+        let summary_messages = vec![
+            forgeone_context::PromptMessage {
+                message_id: "summary-sys".to_string(),
+                role: "system".to_string(),
+                content: "You are a context compression engine. Summarize the following information briefly.".to_string(),
+                source_segment_refs: vec![],
+                tool_call_id: None,
+            },
+            forgeone_context::PromptMessage {
+                message_id: "summary-user".to_string(),
+                role: "user".to_string(),
+                content: summary_prompt,
+                source_segment_refs: vec![],
+                tool_call_id: None,
+            },
+        ];
+
+        // Get the model name from session config
+        let model_name = &session.config.model_name;
+
+        // Build a minimal snapshot for the dispatch
+        let summary_snapshot = forgeone_context::ContextSnapshot {
+            snapshot_id: "summary".to_string(),
+            session_id: state.session_id.clone(),
+            agent_id: state.agent_id.clone(),
+            loop_index: state.loop_index,
+            sources: vec![],
+            selected_segments: vec![],
+            compression_events: vec![],
+            layers: vec![],
+            prompt_messages: summary_messages,
+            budget: forgeone_context::ContextBudget {
+                total_tokens: 4096,
+                reserved_system_tokens: 1024,
+                reserved_working_memory_tokens: 0,
+                reserved_recent_tokens: 0,
+                reserved_observation_tokens: 0,
+            },
+            budget_estimate: 128,
+        };
+
+        let summary_request = forgeone_model::ModelRequest {
+            request_id: format!("summary-{}", state.loop_index),
+            model_name: model_name.clone(),
+            prompt_token_estimate: 128,
+            context_window: 128_000,
+            max_output_tokens: Some(1024),
+        };
+
+        // Call the model for summarization
+        let result = self.dispatch_to_adapter(model_name, &summary_snapshot, &summary_request);
+        match result {
+            Ok(response) => {
+                let summary = match &response.action {
+                    forgeone_model::ModelAction::FinalResponse { content } => content.clone(),
+                    forgeone_model::ModelAction::RequestTools { content, .. } => {
+                        content.clone().unwrap_or_else(|| "summary unavailable".to_string())
+                    }
+                };
+                state.compression_summary = Some(summary.clone());
+                trace.push(forgeone_trace::TraceEvent::new(
+                    state.session_id.clone(),
+                    state.agent_id.clone(),
+                    state.parent_agent_id.clone(),
+                    state.loop_index,
+                    forgeone_trace::TraceEventKind::ContextBuilt,
+                    format!("compression_summary: {}", summary),
+                ));
+            }
+            Err(e) => {
+                // Fallback: mechanical summary
+                let fallback = format!("context compression occurred: archived content unavailable (model error: {})", e);
+                state.compression_summary = Some(fallback);
+            }
+        }
     }
 
     fn build_session_history(&self, state: &RuntimeState, session: &Session) -> Vec<String> {
@@ -1217,7 +1349,6 @@ impl<S: SessionStore> RuntimeCore<S> {
         ModelRequest {
             request_id: next_model_request_id(),
             model_name: config.model_name.clone(),
-            messages: snapshot.prompt_messages.clone(),
             prompt_token_estimate: snapshot.budget_estimate,
             context_window: model_capabilities.context_window,
             max_output_tokens: config.max_output_tokens,
@@ -1278,97 +1409,103 @@ impl<S: SessionStore> RuntimeCore<S> {
         }
 
         MockModelAdapter.estimate(request)
-    }
-
-    fn request_model(&self, state: &RuntimeState) -> ModelResponse {
+    }    fn request_model(&self, state: &RuntimeState) -> ModelResponse {
         let request = state
             .active_model_request
             .as_ref()
             .expect("model request should exist before model adapter call");
+        let snapshot = state
+            .active_context_snapshot
+            .as_ref()
+            .expect("context snapshot should exist before model adapter call");
         let _estimate = self.estimate_model_request(request);
 
-        // Dispatch to the appropriate adapter based on model_name prefix.
-        // Format: "openai:gpt-4o" or "ollama:qwen2.5-coder:7b" or "mock" (default).
-        let model_name = &request.model_name;
-        if model_name.starts_with("openai:") {
-            #[cfg(feature = "openai")]
-            {
-                match forgeone_model_openai::OpenAiModelAdapter::from_env() {
-                    Ok(adapter) => return adapter.respond(request),
-                    Err(error) => {
+        let mut current_model_name = request.model_name.clone();
+        let max_retries = 3;
+        
+        for attempt in 0..max_retries {
+            let result = self.dispatch_to_adapter(&current_model_name, snapshot, request);
+            match result {
+                Ok(response) => return response,
+                Err(error) => {
+                    // Backoff and retry
+                    println!("[runtime] model request failed (attempt {}): {}", attempt + 1, error);
+                    std::thread::sleep(std::time::Duration::from_millis(1000 * (1 << attempt)));
+                    
+                    if attempt == max_retries - 1 {
+                        // Fallback mechanism
+                        if current_model_name != "openai:gpt-4o-mini" {
+                            println!("[runtime] switching to fallback model: openai:gpt-4o-mini");
+                            current_model_name = "openai:gpt-4o-mini".to_string();
+                            // allow one more try with fallback
+                            let fallback_result = self.dispatch_to_adapter(&current_model_name, snapshot, request);
+                            if let Ok(response) = fallback_result {
+                                return response;
+                            }
+                        }
+                        
                         return ModelResponse {
-                            response_id: next_model_request_id(),
-                            action: ModelAction::FinalResponse {
-                                content: format!(
-                                    "[runtime] openai adapter unavailable for model={model_name}: {error}"
-                                ),
+                            response_id: forgeone_model::next_model_request_id(),
+                            action: forgeone_model::ModelAction::FinalResponse {
+                                content: format!("[runtime] all retries and fallbacks failed: {}", error),
                             },
-                            summary: format!("openai adapter unavailable: {error}"),
+                            summary: format!("model failure: {}", error),
                         };
                     }
                 }
             }
+        }
+        unreachable!()
+    }
+
+    fn dispatch_to_adapter(&self, model_name: &str, snapshot: &forgeone_context::ContextSnapshot, request: &forgeone_model::ModelRequest) -> Result<forgeone_model::ModelResponse, forgeone_model::ModelError> {
+        if model_name.starts_with("openai:") {
+            #[cfg(feature = "openai")]
+            {
+                match forgeone_model_openai::OpenAiModelAdapter::from_env() {
+                    Ok(adapter) => return adapter.respond(snapshot, request),
+                    Err(e) => return Err(forgeone_model::ModelError::ProviderUnavailable(e)),
+                }
+            }
             #[cfg(not(feature = "openai"))]
             {
-                return ModelResponse {
-                    response_id: next_model_request_id(),
-                    action: ModelAction::FinalResponse {
-                        content: format!(
-                            "[runtime] openai feature not enabled for model={model_name} estimate_total_tokens={}",
-                            _estimate.total_expected_tokens
-                        ),
-                    },
-                    summary: "openai adapter unavailable".to_string(),
-                };
+                return Err(forgeone_model::ModelError::ProviderUnavailable("openai feature not enabled".into()));
             }
-        }
-
-        if model_name.starts_with("ollama:") {
+        } else if model_name.starts_with("ollama:") {
             #[cfg(feature = "ollama")]
             {
                 let adapter = forgeone_model_ollama::OllamaModelAdapter::from_env();
-                return adapter.respond(request);
+                return adapter.respond(snapshot, request);
             }
             #[cfg(not(feature = "ollama"))]
             {
-                return ModelResponse {
-                    response_id: next_model_request_id(),
-                    action: ModelAction::FinalResponse {
-                        content: format!(
-                            "[runtime] ollama feature not enabled for model={model_name} estimate_total_tokens={}",
-                            _estimate.total_expected_tokens
-                        ),
-                    },
-                    summary: "ollama adapter unavailable".to_string(),
-                };
+                return Err(forgeone_model::ModelError::ProviderUnavailable("ollama feature not enabled".into()));
             }
         }
 
-        // Fall back to MockModelAdapter for unknown / test model names
-        let adapter = MockModelAdapter;
-        adapter.respond(request)
+        let adapter = forgeone_model::MockModelAdapter;
+        adapter.respond(snapshot, request)
     }
 
-    fn decide_tool_call(&self, state: &RuntimeState) -> Option<ToolCallRequest> {
+    fn decide_tool_call(&self, state: &RuntimeState) -> Vec<ToolCallRequest> {
         let response = state
             .last_model_response
             .as_ref()
             .expect("model response should exist before tool decision");
 
         match &response.action {
-            ModelAction::RequestTool {
-                tool_name,
-                arguments,
-            } => Some(ToolCallRequest {
-                call_id: next_tool_call_id(),
-                session_id: state.session_id.clone(),
-                agent_id: state.agent_id.clone(),
-                loop_index: state.loop_index,
-                tool_name: tool_name.clone(),
-                arguments: arguments.clone(),
-                requested_by: "model".to_string(),
-            }),
-            ModelAction::FinalResponse { .. } => None,
+            ModelAction::RequestTools { tool_calls, .. } => {
+                tool_calls.iter().map(|tc| ToolCallRequest {
+                    call_id: next_tool_call_id(),
+                    session_id: state.session_id.clone(),
+                    agent_id: state.agent_id.clone(),
+                    loop_index: state.loop_index,
+                    tool_name: tc.tool_name.clone(),
+                    arguments: tc.arguments.clone(),
+                    requested_by: "model".to_string(),
+                }).collect()
+            }
+            ModelAction::FinalResponse { .. } => vec![],
         }
     }
 
@@ -1376,7 +1513,13 @@ impl<S: SessionStore> RuntimeCore<S> {
         let response = state.last_model_response.as_ref()?;
         match &response.action {
             ModelAction::FinalResponse { content } => Some(content.clone()),
-            ModelAction::RequestTool { .. } => None,
+            ModelAction::RequestTools { content, tool_calls } => {
+                if tool_calls.is_empty() {
+                    content.clone()
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -1900,7 +2043,8 @@ mod tests {
             "search_files",
             [("pattern", "Cargo.toml"), ("path", "/etc")],
         );
-        let outcome = core.execute_tool_call(&mut state, Some(&config.policy));
+        let active_mcp_clients = Vec::new();
+        let outcome = core.execute_tool_call(&mut state, Some(&config.policy), &active_mcp_clients);
 
         assert!(matches!(outcome, super::ToolExecutionOutcome::Denied));
         assert_eq!(state.budget_usage.tool_call_count, 0);
@@ -2037,7 +2181,8 @@ mod tests {
             },
         };
 
-        state.active_context_snapshot = Some(core.build_context_snapshot(&state, &session));
+        let active_mcp_clients = Vec::new();
+        state.active_context_snapshot = Some(core.build_context_snapshot(&state, &session, &active_mcp_clients));
         let request = core.build_model_request(&state, &session.config);
 
         assert_eq!(request.context_window, 128_000);
@@ -2083,6 +2228,7 @@ mod tests {
             pending_approval: None,
             budget_usage: super::BudgetUsage::default(),
             stop_reason: None,
+            compression_summary: None,
         }
     }
 

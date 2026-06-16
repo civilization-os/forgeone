@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build && tsc -p tsconfig.electron.json",
     "start": "electron .",
-    "electron:dev": "concurrently -k \"npm run dev\" \"electron .\""
+    "electron:dev": "tsc -p tsconfig.electron.json && concurrently -k \"npm run dev\" \"electron .\""
   },
   "dependencies": {
     "react": "^18.3.1",

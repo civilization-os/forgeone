@@ -21,4 +21,8 @@ electron_1.contextBridge.exposeInMainWorld('forgeone', {
         electron_1.ipcRenderer.on('window-state-changed', subscription);
         return () => electron_1.ipcRenderer.removeListener('window-state-changed', subscription);
     },
+    readDir: (dirPath) => electron_1.ipcRenderer.invoke('fs:read-dir', dirPath),
+    readFile: (filePath) => electron_1.ipcRenderer.invoke('fs:read-file', filePath),
+    writeFile: (filePath, content) => electron_1.ipcRenderer.invoke('fs:write-file', filePath, content),
+    selectDir: () => electron_1.ipcRenderer.invoke('fs:select-dir'),
 });

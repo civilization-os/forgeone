@@ -398,6 +398,7 @@ mod tests {
                 reason: "sensitive root".to_string(),
                 argument_summary: "path=secrets/prod.env".to_string(),
             },
+            mcp_servers: vec![],
         }
     }
 

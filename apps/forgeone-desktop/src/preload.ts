@@ -20,4 +20,8 @@ contextBridge.exposeInMainWorld('forgeone', {
     ipcRenderer.on('window-state-changed', subscription);
     return () => ipcRenderer.removeListener('window-state-changed', subscription);
   },
+  readDir: (dirPath: string) => ipcRenderer.invoke('fs:read-dir', dirPath),
+  readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
+  writeFile: (filePath: string, content: string) => ipcRenderer.invoke('fs:write-file', filePath, content),
+  selectDir: () => ipcRenderer.invoke('fs:select-dir'),
 });
