@@ -891,10 +891,8 @@ fn collect_glob_matches(
     }
     if depth >= parts.len() {
         // All parts matched - record this path
-        if dir.exists() {
-            if let Ok(rel) = dir.strip_prefix(root) {
-                results.push(rel.display().to_string());
-            }
+        if dir.exists() && let Ok(rel) = dir.strip_prefix(root) {
+            results.push(rel.display().to_string());
         }
         return;
     }
@@ -918,13 +916,13 @@ fn collect_glob_matches(
                 .replace('*', ".*")
                 .replace('?', ".")
         );
-        if let Ok(re) = regex_lite::Regex::new(&re_pattern) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if re.is_match(&name) {
-                        collect_glob_matches(&entry.path(), parts, depth + 1, root, results, max);
-                    }
+        if let Ok(re) = regex_lite::Regex::new(&re_pattern)
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if re.is_match(&name) {
+                    collect_glob_matches(&entry.path(), parts, depth + 1, root, results, max);
                 }
             }
         }
@@ -993,9 +991,11 @@ impl ToolExecutor for DirectoryTreeTool {
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn build_tree(
     dir: &std::path::Path,
     root: &std::path::Path,
+
     depth: usize,
     max_depth: usize,
     include_deps: bool,
@@ -1170,23 +1170,21 @@ impl ToolExecutor for DiagnosticsTool {
 
                 // Parse JSON lines from cargo output
                 for line in stdout.lines() {
-                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(reason) = msg.get("reason").and_then(|v| v.as_str()) {
-                            if reason == "compiler-message" {
-                                if let Some(message) = msg.get("message") {
-                                    let level = message.get("level").and_then(|v| v.as_str()).unwrap_or("");
-                                    let msg_text = message.get("rendered").and_then(|v| v.as_str())
-                                        .or_else(|| message.get("message").and_then(|v| v.as_str()))
-                                        .unwrap_or("")
-                                        .to_string();
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line)
+                        && let Some(reason) = msg.get("reason").and_then(|v| v.as_str())
+                        && reason == "compiler-message"
+                        && let Some(message) = msg.get("message")
+                    {
+                        let level = message.get("level").and_then(|v| v.as_str()).unwrap_or("");
+                        let msg_text = message.get("rendered").and_then(|v| v.as_str())
+                            .or_else(|| message.get("message").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .to_string();
 
-                                    if level == "error" {
-                                        errors.push(msg_text);
-                                    } else if level == "warning" {
-                                        warnings.push(msg_text);
-                                    }
-                                }
-                            }
+                        if level == "error" {
+                            errors.push(msg_text);
+                        } else if level == "warning" {
+                            warnings.push(msg_text);
                         }
                     }
                 }
@@ -1411,7 +1409,7 @@ fn decode_windows_console_output(bytes: &[u8]) -> String {
 
 #[cfg(windows)]
 fn looks_like_utf16le(bytes: &[u8]) -> bool {
-    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+    if bytes.len() < 4 || !bytes.len().is_multiple_of(2) {
         return false;
     }
 
