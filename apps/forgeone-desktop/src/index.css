@@ -888,13 +888,12 @@ body.dark-theme .runtime-stat-chip {
 .message-list {
   margin: 0;
   padding-left: 22px;
-  display: flex;
-  flex-direction: column;
   gap: 6px;
 }
 
 .message-list.ordered {
   list-style: decimal;
+  padding-left: 28px;
 }
 
 .message-list li {
@@ -908,6 +907,66 @@ body.dark-theme .runtime-stat-chip {
   background: rgba(45, 99, 237, 0.05);
   color: var(--on-surface-variant);
   border-radius: 0 10px 10px 0;
+}
+
+/* ===== 分割线 --- ===== */
+.message-hr {
+  margin: 8px 0;
+  border: none;
+  border-top: 1px solid var(--border-color);
+  opacity: 0.7;
+}
+
+/* ===== Markdown 表格 ===== */
+.message-table-wrap {
+  overflow-x: auto;
+  margin: 4px 0;
+}
+
+.message-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.message-table th,
+.message-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border: 1px solid var(--border-color);
+  vertical-align: top;
+}
+
+.message-table th {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+  background: var(--surface-low);
+}
+
+.message-table td {
+  color: var(--on-surface);
+  white-space: pre-wrap;
+}
+
+.message-table tbody tr:nth-child(even) {
+  background: var(--surface-low);
+}
+
+body.dark-theme .message-table th {
+  background: var(--surface-container);
+  color: var(--on-surface);
+}
+
+body.dark-theme .message-table td {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+body.dark-theme .message-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .message-inline-code {
@@ -1016,16 +1075,53 @@ body.dark-theme .runtime-stat-chip {
   color: var(--on-surface);
 }
 
+/* ===== 代码块行号 + 高亮容器 ===== */
+
+.formatted-output-code-wrap {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.formatted-output-ln {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 14px 0 14px 14px;
+  user-select: none;
+  color: rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  line-height: 1.65;
+  font-family: var(--font-mono);
+}
+
+.formatted-output-ln-num {
+  display: block;
+  padding: 0 10px 0 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .formatted-output-pre {
   margin: 0;
-  padding: 14px;
-  overflow-x: auto;
+  padding: 14px 14px 14px 0;
+  overflow: visible;
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   line-height: 1.65;
   font-family: var(--font-mono);
   color: var(--on-surface);
   background: rgba(255, 255, 255, 0.74);
   white-space: pre;
+}
+
+.formatted-output-pre code.hljs {
+  display: block;
+  background: transparent !important;
+  padding: 0 !important;
+  overflow: visible;
 }
 
 .structured-output-table-wrap {
@@ -1132,6 +1228,101 @@ body.dark-theme .formatted-output-copy:hover {
 
 body.dark-theme .formatted-output-pre {
   background: rgba(255, 255, 255, 0.02);
+}
+
+body.dark-theme .formatted-output-ln {
+  color: rgba(255, 255, 255, 0.15);
+}
+
+/* ===== highlight.js 代码高亮 — 亮色主题（github.css）通过 import 引入 ===== */
+
+/* 高亮代码在 .formatted-output-pre 内的布局 */
+.formatted-output-pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+/* ===== highlight.js 暗色主题 — body.dark-theme 下覆盖 ===== */
+body.dark-theme .formatted-output-pre .hljs {
+  color: #e6e6e6;
+  background: transparent;
+}
+
+body.dark-theme .formatted-output-pre .hljs-comment,
+body.dark-theme .formatted-output-pre .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+
+body.dark-theme .formatted-output-pre .hljs-keyword,
+body.dark-theme .formatted-output-pre .hljs-selector-tag,
+body.dark-theme .formatted-output-pre .hljs-literal,
+body.dark-theme .formatted-output-pre .hljs-type,
+body.dark-theme .formatted-output-pre .hljs-addition {
+  color: #ff7b72;
+}
+
+body.dark-theme .formatted-output-pre .hljs-number,
+body.dark-theme .formatted-output-pre .hljs-selector-attr,
+body.dark-theme .formatted-output-pre .hljs-selector-pseudo {
+  color: #79c0ff;
+}
+
+body.dark-theme .formatted-output-pre .hljs-string,
+body.dark-theme .formatted-output-pre .hljs-doctag,
+body.dark-theme .formatted-output-pre .hljs-regexp {
+  color: #a5d6ff;
+}
+
+body.dark-theme .formatted-output-pre .hljs-title,
+body.dark-theme .formatted-output-pre .hljs-section,
+body.dark-theme .formatted-output-pre .hljs-built_in,
+body.dark-theme .formatted-output-pre .hljs-name {
+  color: #d2a8ff;
+}
+
+body.dark-theme .formatted-output-pre .hljs-variable,
+body.dark-theme .formatted-output-pre .hljs-template-variable,
+body.dark-theme .formatted-output-pre .hljs-params {
+  color: #ffa657;
+}
+
+body.dark-theme .formatted-output-pre .hljs-attr,
+body.dark-theme .formatted-output-pre .hljs-attribute {
+  color: #79c0ff;
+}
+
+body.dark-theme .formatted-output-pre .hljs-meta,
+body.dark-theme .formatted-output-pre .hljs-tag {
+  color: #8b949e;
+}
+
+body.dark-theme .formatted-output-pre .hljs-link {
+  color: #58a6ff;
+  text-decoration: underline;
+}
+
+body.dark-theme .formatted-output-pre .hljs-deletion {
+  color: #ff7b72;
+}
+
+body.dark-theme .formatted-output-pre .hljs-symbol,
+body.dark-theme .formatted-output-pre .hljs-bullet {
+  color: #d2a8ff;
+}
+
+/* 行号（如果启用） */
+body.dark-theme .formatted-output-pre .hljs-ln-numbers {
+  color: #484f58;
+}
+
+/* 选中高亮行背景 */
+body.dark-theme .formatted-output-pre .hljs-line-highlight {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .badge-tag {

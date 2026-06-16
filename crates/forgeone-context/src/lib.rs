@@ -566,8 +566,8 @@ fn build_layer_states(selected_segments: &[SelectedSegment]) -> Vec<ContextLayer
 
 fn assemble_messages(
     selected_segments: &[SelectedSegment],
-    layers: &[ContextLayerState],
-    compression_events: &[CompressionEvent],
+    _layers: &[ContextLayerState],
+    _compression_events: &[CompressionEvent],
 ) -> Vec<PromptMessage> {
     let mut system_segments = Vec::new();
     let mut user_segments = Vec::new();
@@ -615,26 +615,12 @@ fn assemble_messages(
     }
 
     if !user_segments.is_empty() {
-        let layer_header = layers
-            .iter()
-            .filter(|layer| {
-                layer.layer != ContextLayer::GoalAnchor && !layer.segment_refs.is_empty()
-            })
-            .map(|layer| format!("- {} tokens={}", layer.layer, layer.token_estimate))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let compression_header = render_compression_events(compression_events);
         let grouped_segments = render_grouped_segments(&user_segments);
         messages.push(PromptMessage {
             message_id: next_message_id(),
             role: "user".to_string(),
             tool_call_id: None,
-            content: format!(
-                "## Prompt-Loaded Context\nThese sections are the only non-system context currently loaded into the prompt.\n\n### Layer Balance\n{}\n\n### Compression Events\n{}\n\n{}",
-                layer_header,
-                compression_header,
-                grouped_segments
-            ),
+            content: grouped_segments,
             source_segment_refs: user_segments
                 .iter()
                 .map(|segment| segment.segment_id.clone())
@@ -787,6 +773,7 @@ fn render_grouped_segments(user_segments: &[&SelectedSegment]) -> String {
         .join("\n\n")
 }
 
+#[allow(dead_code)]
 fn render_compression_events(compression_events: &[CompressionEvent]) -> String {
     if compression_events.is_empty() {
         return "none".to_string();

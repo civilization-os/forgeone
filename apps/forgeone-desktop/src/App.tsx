@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import hljs from 'highlight.js';
+import 'highlight.js/styles/github.css';
 
 interface TraceEvent {
   timestamp_ms: number;
@@ -889,14 +891,21 @@ type StructuredTableData = {
 
 type InlineToken =
   | { type: 'text'; content: string }
-  | { type: 'code'; content: string };
+  | { type: 'code'; content: string }
+  | { type: 'bold'; content: string }
+  | { type: 'italic'; content: string }
+  | { type: 'strikethrough'; content: string }
+  | { type: 'link'; text: string; url: string }
+  | { type: 'auto_link'; url: string };
 
 type MarkdownBlock =
   | { type: 'heading'; level: number; text: string }
   | { type: 'paragraph'; text: string }
   | { type: 'unordered-list'; items: string[] }
   | { type: 'ordered-list'; items: string[] }
-  | { type: 'blockquote'; lines: string[] };
+  | { type: 'blockquote'; lines: string[] }
+  | { type: 'hr' }
+  | { type: 'table'; headers: string[]; rows: string[][] };
 
 function parseFormattedSegments(text: string): FormattedSegment[] {
   const segments: FormattedSegment[] = [];
@@ -925,7 +934,7 @@ function parseFormattedSegments(text: string): FormattedSegment[] {
 
 function parseInlineTokens(text: string): InlineToken[] {
   const tokens: InlineToken[] = [];
-  const regex = /`([^`\n]+)`/g;
+  const regex = /(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(~~([^~]+)~~)|(`([^`\n]+)`)|((?:https?:\/\/|www\.)[^\s<>"']+)/gi;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -933,7 +942,19 @@ function parseInlineTokens(text: string): InlineToken[] {
     if (match.index > lastIndex) {
       tokens.push({ type: 'text', content: text.slice(lastIndex, match.index) });
     }
-    tokens.push({ type: 'code', content: match[1] });
+    if (match[1] !== undefined) {
+      tokens.push({ type: 'link', text: match[2], url: match[3] });
+    } else if (match[4] !== undefined) {
+      tokens.push({ type: 'bold', content: match[5] });
+    } else if (match[6] !== undefined) {
+      tokens.push({ type: 'italic', content: match[7] });
+    } else if (match[8] !== undefined) {
+      tokens.push({ type: 'strikethrough', content: match[9] });
+    } else if (match[10] !== undefined) {
+      tokens.push({ type: 'code', content: match[11] });
+    } else {
+      tokens.push({ type: 'auto_link', url: match[0] });
+    }
     lastIndex = match.index + match[0].length;
   }
 
@@ -982,6 +1003,33 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
       continue;
     }
 
+    // --- 分割线
+    if (/^(?:-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) {
+      flushParagraph(paragraphBuffer);
+      blocks.push({ type: 'hr' });
+      index += 1;
+      continue;
+    }
+
+    // GFM 表格
+    const tableSepPattern = /^\|[\s:-]+\|(?:[\s:-]+\|\s*)*$/; // |---|---|
+    if (trimmed.startsWith('|') && index + 1 < lines.length && tableSepPattern.test(lines[index + 1].trim())) {
+      flushParagraph(paragraphBuffer);
+      const headers = trimmed.split('|').map(c => c.trim()).filter(Boolean);
+      index += 2; // skip header row + separator row
+      const rows: string[][] = [];
+      while (index < lines.length) {
+        const rowLine = lines[index].trim();
+        if (!rowLine.startsWith('|')) break;
+        const cells = rowLine.split('|').map(c => c.trim()).filter(Boolean);
+        if (cells.length === 0) { index += 1; continue; }
+        rows.push(cells);
+        index += 1;
+      }
+      blocks.push({ type: 'table', headers, rows });
+      continue;
+    }
+
     if (/^>\s?/.test(trimmed)) {
       flushParagraph(paragraphBuffer);
       const quoteLines: string[] = [];
@@ -999,11 +1047,31 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
       flushParagraph(paragraphBuffer);
       const items: string[] = [];
       while (index < lines.length) {
-        const current = lines[index].trim();
-        const match = current.match(/^[-*+]\s+(.+)$/);
-        if (!match) break;
-        items.push(match[1].trim());
-        index += 1;
+        const current = lines[index];
+        const trimmedLine = current.trim();
+        const match = trimmedLine.match(/^[-*+]\s+(.+)$/);
+        if (match) {
+          items.push(match[1].trim());
+          index += 1;
+          continue;
+        }
+        // --- / *** / ___ 不是列表续行，中断列表
+        if (/^(?:-{3,}|\*{3,}|_{3,})\s*$/.test(trimmedLine)) {
+          break;
+        }
+        // Indented continuation of the last item
+        if (items.length > 0 && /^\s/.test(current) && trimmedLine.length > 0) {
+          const last = items.pop() || '';
+          items.push(last + '\n' + trimmedLine);
+          index += 1;
+          continue;
+        }
+        // Skip blank lines within the list (don't break on empty lines)
+        if (trimmedLine.length === 0) {
+          index += 1;
+          continue;
+        }
+        break;
       }
       blocks.push({ type: 'unordered-list', items });
       continue;
@@ -1013,11 +1081,35 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
       flushParagraph(paragraphBuffer);
       const items: string[] = [];
       while (index < lines.length) {
-        const current = lines[index].trim();
-        const match = current.match(/^\d+\.\s+(.+)$/);
-        if (!match) break;
-        items.push(match[1].trim());
-        index += 1;
+        const current = lines[index];
+        const trimmedLine = current.trim();
+        const match = trimmedLine.match(/^\d+\.\s+(.+)$/);
+        if (match) {
+          items.push(match[1].trim());
+          index += 1;
+          continue;
+        }
+        // --- / *** / ___ 不是列表续行，中断列表
+        if (/^(?:-{3,}|\*{3,}|_{3,})\s*$/.test(trimmedLine)) {
+          break;
+        }
+        // ### heading 不是列表续行，中断列表
+        if (/^#{1,4}\s/.test(trimmedLine)) {
+          break;
+        }
+        // Continuation of last item: indented sub-bullet OR word-wrapped line
+        if (items.length > 0 && trimmedLine.length > 0) {
+          const last = items.pop() || '';
+          items.push(last + '\n' + trimmedLine);
+          index += 1;
+          continue;
+        }
+        // Skip blank lines within the list
+        if (trimmedLine.length === 0) {
+          index += 1;
+          continue;
+        }
+        break;
       }
       blocks.push({ type: 'ordered-list', items });
       continue;
@@ -1158,10 +1250,18 @@ function FormattedCodeBlock({
   const table = React.useMemo(() => parseWindowsDirectoryTable(formattedCode, lang), [formattedCode, lang]);
   const [view, setView] = React.useState<'table' | 'raw'>(table ? 'table' : 'raw');
   const [copied, setCopied] = React.useState(false);
+  const codeRef = React.useRef<HTMLElement>(null);
 
   React.useEffect(() => {
     setView(table ? 'table' : 'raw');
   }, [table, formattedCode]);
+
+  // 代码高亮
+  React.useEffect(() => {
+    if (codeRef.current && view === 'raw') {
+      hljs.highlightElement(codeRef.current);
+    }
+  }, [formattedCode, language, view]);
 
   const handleCopy = async () => {
     try {
@@ -1172,6 +1272,37 @@ function FormattedCodeBlock({
       console.error('Failed to copy code block', error);
     }
   };
+
+  // 将语言标识映射到 highlight.js 支持的语言
+  const hljsLang = React.useMemo(() => {
+    const langMap: Record<string, string> = {
+      'js': 'javascript',
+      'ts': 'typescript',
+      'tsx': 'typescript',
+      'jsx': 'javascript',
+      'rs': 'rust',
+      'py': 'python',
+      'rb': 'ruby',
+      'sh': 'bash',
+      'shell': 'bash',
+      'zsh': 'bash',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      'html': 'xml',
+      'md': 'markdown',
+      'c++': 'cpp',
+      'c#': 'csharp',
+      'fs': 'fsharp',
+      'kt': 'kotlin',
+      'swift': 'swift',
+      'go': 'go',
+      'toml': 'ini',
+      'dockerfile': 'dockerfile',
+      'diff': 'diff',
+      'json': 'json',
+    };
+    return langMap[language.toLowerCase()] || language.toLowerCase();
+  }, [language]);
 
   return (
     <div className="formatted-output-card">
@@ -1211,7 +1342,20 @@ function FormattedCodeBlock({
       </div>
       {table && view === 'table'
         ? <StructuredTableView table={table} />
-        : <pre className="formatted-output-pre">{formattedCode}</pre>}
+        : (
+          <div className="formatted-output-code-wrap">
+            <div className="formatted-output-ln" aria-hidden="true">
+              {formattedCode.split('\n').map((_, i) => (
+                <span key={i} className="formatted-output-ln-num">{i + 1}</span>
+              ))}
+            </div>
+            <pre className="formatted-output-pre">
+              <code ref={codeRef} className={`hljs language-${hljsLang}`}>
+                {formattedCode}
+              </code>
+            </pre>
+          </div>
+        )}
     </div>
   );
 }
@@ -1220,11 +1364,24 @@ function InlineMarkdown({ text }: { text: string }) {
   const tokens = parseInlineTokens(text);
   return (
     <>
-      {tokens.map((token, index) => (
-        token.type === 'code'
-          ? <code key={`inline-code-${index}`} className="message-inline-code">{token.content}</code>
-          : <React.Fragment key={`inline-text-${index}`}>{token.content}</React.Fragment>
-      ))}
+      {tokens.map((token, index) => {
+        switch (token.type) {
+          case 'code':
+            return <code key={`ic-${index}`} className="message-inline-code">{token.content}</code>;
+          case 'bold':
+            return <strong key={`b-${index}`}>{token.content}</strong>;
+          case 'italic':
+            return <em key={`i-${index}`}>{token.content}</em>;
+          case 'strikethrough':
+            return <del key={`s-${index}`}>{token.content}</del>;
+          case 'link':
+            return <a key={`l-${index}`} href={token.url} target="_blank" rel="noopener noreferrer">{token.text}</a>;
+          case 'auto_link':
+            return <a key={`al-${index}`} href={token.url} target="_blank" rel="noopener noreferrer">{token.url}</a>;
+          default:
+            return <React.Fragment key={`t-${index}`}>{token.content}</React.Fragment>;
+        }
+      })}
     </>
   );
 }
@@ -1242,6 +1399,10 @@ function MarkdownTextBlock({ text }: { text: string }) {
               <InlineMarkdown text={block.text} />
             </Tag>
           );
+        }
+
+        if (block.type === 'hr') {
+          return <hr key={`hr-${index}`} className="message-hr" />;
         }
 
         if (block.type === 'unordered-list') {
@@ -1271,6 +1432,31 @@ function MarkdownTextBlock({ text }: { text: string }) {
                 <div key={`quote-line-${lineIndex}`}><InlineMarkdown text={line} /></div>
               ))}
             </blockquote>
+          );
+        }
+
+        if (block.type === 'table') {
+          return (
+            <div key={`table-${index}`} className="message-table-wrap">
+              <table className="message-table">
+                <thead>
+                  <tr>
+                    {block.headers.map((h, i) => (
+                      <th key={`th-${i}`}><InlineMarkdown text={h} /></th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, ri) => (
+                    <tr key={`tr-${ri}`}>
+                      {row.map((cell, ci) => (
+                        <td key={`td-${ri}-${ci}`}><InlineMarkdown text={cell} /></td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           );
         }
 
@@ -1651,6 +1837,7 @@ export default function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [traceExpanded, setTraceExpanded] = useState<Record<string, boolean>>({});
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [isApprovalCollapsed, setIsApprovalCollapsed] = useState(false);
   const [runtimeNowMs, setRuntimeNowMs] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1668,15 +1855,7 @@ export default function App() {
   const [explorerTree, setExplorerTree] = useState<any[]>([]);
   const [explorerOpenedFiles, setExplorerOpenedFiles] = useState<{path: string, name: string, content: string, isDirty: boolean}[]>([]);
   const [explorerActiveFile, setExplorerActiveFile] = useState<string | null>(null);
-  const [explorerWorkspacePath, setExplorerWorkspacePath] = useState<string>('');
-
-  const [projectRoot, setProjectRoot] = useState('D:/project/forgeone');
-  const [permissions, setPermissions] = useState({
-    read: true,
-    write: true,
-    execute: true,
-    delete: false
-  });
+  const [projectRoot] = useState('D:/project/forgeone');
   
   // 模型面板状态 - 升级为多配置 (Model Profiles) 管理
   const [profiles, setProfiles] = useState<ModelProfile[]>(() => {
@@ -3060,15 +3239,49 @@ export default function App() {
                           </div>
                         )}
                         <div className="message-content-wrapper">
-                          <div className="message-sender-row">
-                            <span className="message-sender-label">
-                              {msg.sender === 'user' ? t.userLabel : t.agentLabel}
-                            </span>
-                            {msg.sender === 'agent' && msg.status && (
-                              <span className="badge-tag">
-                                {msg.status === 'running' ? t.statusRunning : msg.status === 'completed' ? t.statusCompleted : t.statusSuspended}
+                          <div className="message-sender-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className="message-sender-label">
+                                {msg.sender === 'user' ? t.userLabel : t.agentLabel}
                               </span>
-                            )}
+                              {msg.sender === 'agent' && msg.status && (
+                                <span className="badge-tag">
+                                  {msg.status === 'running' ? t.statusRunning : msg.status === 'completed' ? t.statusCompleted : t.statusSuspended}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="message-copy-btn"
+                              title={lang === 'zh' ? '复制内容' : 'Copy Content'}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--on-surface-variant)',
+                                opacity: 0.6,
+                                cursor: 'pointer',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                transition: 'all 0.2s'
+                              }}
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(msg.content);
+                                  setCopiedMessageId(msg.id);
+                                  setTimeout(() => setCopiedMessageId(null), 1500);
+                                } catch (e) {
+                                  console.error('Failed to copy message content', e);
+                                }
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'var(--surface-container-highest)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.6'; e.currentTarget.style.background = 'transparent'; }}
+                            >
+                              {copiedMessageId === msg.id ? (lang === 'zh' ? '已复制' : 'Copied!') : (lang === 'zh' ? '复制' : 'Copy')}
+                            </button>
                           </div>
 
                           <div className="message-bubble-body">
@@ -3318,7 +3531,7 @@ export default function App() {
                             }}
                             onClick={() => setShowMiniSelector(!showMiniSelector)}
                           >
-                            <Icon name="psychology" className="icon" style={{ fontSize: '15px' }} />
+                            <Icon name="smart_toy" className="icon" style={{ fontSize: '15px' }} />
                             <span>{activeProfile ? activeProfile.name : (lang === 'zh' ? '选择模型' : 'Select Model')}</span>
                             <span style={{ fontSize: '9px', opacity: 0.7, transform: showMiniSelector ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
                           </div>
@@ -3438,7 +3651,7 @@ export default function App() {
                       onClick={async () => {
                         const dirPath = await (window as any).forgeone.selectDir();
                         if (dirPath) {
-                          setExplorerWorkspacePath(dirPath);
+                          
                           try {
                             const tree = await (window as any).forgeone.readDir(dirPath);
                             setExplorerTree(tree);
