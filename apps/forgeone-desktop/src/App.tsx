@@ -144,8 +144,9 @@ const translations = {
     brandSub: '开放智能代理运行时',
     newAgentBtn: '新建任务',
     tabChat: '聊天',
+    tabAgent: 'Agent',
     tabExplorer: '资源管理器',
-    tabProject: '工作区设置',
+    tabProject: '项目',
     tabModel: '模型',
     tabMcp: 'MCP 服务',
     tabSkill: '技能插件',
@@ -296,6 +297,7 @@ const translations = {
     brandSub: 'Open Agent Runtime',
     newAgentBtn: 'New Task',
     tabChat: 'Chat',
+    tabAgent: 'Agent',
     tabExplorer: 'Explorer',
     tabProject: 'Project',
     tabModel: 'Model',
@@ -449,6 +451,14 @@ const translations = {
 function Icon({ name, className = '', style = {} }: { name: string; className?: string; style?: React.CSSProperties }) {
   const icons: Record<string, React.ReactNode> = {
     chat: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>,
+    agent: (
+      <>
+        <circle cx="12" cy="9" r="4.5"></circle>
+        <path d="M5 20v-1a7 7 0 0 1 14 0v1"></path>
+        <circle cx="19" cy="6" r="2.5" fill="currentColor" opacity="0.6"></circle>
+        <path d="M19 8.5v2M19 8.5l-2 1M19 8.5l2 1" strokeWidth="1.5" opacity="0.6"></path>
+      </>
+    ),
     light_mode: (
       <>
         <circle cx="12" cy="12" r="5"></circle>
@@ -1745,7 +1755,7 @@ function MessageRuntimeMeta({
 export default function App() {
   const forgeoneDesktop = (window as any).forgeone;
   // 核心板块切换状态：'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'
-  const [activeTab, setActiveTab] = useState<'chat' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'agent' | 'project' | 'model' | 'mcp' | 'skill' | 'policy' | 'trace'>('chat');
   
   // 主题状态：默认暗色 'dark'
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -1816,6 +1826,89 @@ export default function App() {
   const [mcpFormHeaders, setMcpFormHeaders] = useState<Array<{ key: string; value: string }>>([{ key: '', value: '' }]);
   const [mcpFormSandbox, setMcpFormSandbox] = useState(true);
 
+  // Agent 管理状态
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>('general-assistant');
+  const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
+
+  // 自定义 Agent 存储 (localStorage 持久化)
+  const [customAgents, setCustomAgents] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('forgeone_custom_agents');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+
+  // Agent 创建表单状态
+  const initialFormState = {
+    name: '',
+    avatar: '🤖',
+    systemPrompt: '',
+    temperature: 0.5,
+    modelId: '',
+    tools: [] as string[],
+    maxIterations: 5,
+    editingId: null as string | null,
+  };
+  const [agentForm, setAgentForm] = useState({ ...initialFormState });
+
+  const AVAILABLE_AVATARS = ['🤖', '💻', '📝', '📊', '🎨', '🔬', '🧠', '🛠️', '🎯', '⚡', '🌟', '🔍'];
+
+  // 预置默认 Agent 列表
+  const defaultAgents = [
+    {
+      id: 'general-assistant',
+      name: lang === 'zh' ? '通用助手' : 'General Assistant',
+      role: lang === 'zh' ? '通用对话与任务执行' : 'General conversation & task execution',
+      icon: '🤖',
+      color: '#6366f1',
+      systemPrompt: lang === 'zh'
+        ? '你是一个通用 AI 助手，擅长处理各类对话和任务。你可以回答问题、编写代码、分析数据、撰写文档等。请根据用户的具体需求，提供准确、全面的帮助。'
+        : 'You are a general-purpose AI assistant skilled at handling various conversations and tasks. You can answer questions, write code, analyze data, write documents, etc. Provide accurate and comprehensive help based on the user\'s specific needs.',
+      tools: ['read_file', 'search_content', 'web_search', 'run_command', 'chat'],
+    },
+    {
+      id: 'code-expert',
+      name: lang === 'zh' ? '代码专家' : 'Code Expert',
+      role: lang === 'zh' ? '专注代码编写与审查' : 'Code writing & review specialist',
+      icon: '💻',
+      color: '#22c55e',
+      systemPrompt: lang === 'zh'
+        ? '你是一个代码专家 Agent，专注于软件开发和代码审查。你擅长：阅读和理解代码库、编写高质量代码、审查代码变更、调试问题、优化性能。请始终提供清晰、可维护的代码示例和解释。'
+        : 'You are a Code Expert Agent focused on software development and code review. You excel at: reading and understanding codebases, writing high-quality code, reviewing code changes, debugging issues, and optimizing performance. Always provide clean, maintainable code examples and explanations.',
+      tools: ['read_file', 'search_content', 'glob', 'edit_file', 'run_command'],
+    },
+    {
+      id: 'document-writer',
+      name: lang === 'zh' ? '文档撰写' : 'Document Writer',
+      role: lang === 'zh' ? '专注文档与设计文档' : 'Documentation & design docs',
+      icon: '📝',
+      color: '#f59e0b',
+      systemPrompt: lang === 'zh'
+        ? '你是一个文档撰写 Agent，擅长编写技术文档、API 文档、架构设计文档和用户指南。你注重：清晰的结构、准确的技术描述、合适的示例和良好的可读性。请根据项目上下文生成专业文档。'
+        : 'You are a Documentation Agent skilled at writing technical documentation, API docs, architecture design docs, and user guides. You focus on: clear structure, accurate technical descriptions, appropriate examples, and good readability.',
+      tools: ['read_file', 'search_content', 'glob', 'write_file', 'edit_file'],
+    },
+    {
+      id: 'data-analyst',
+      name: lang === 'zh' ? '数据分析' : 'Data Analyst',
+      role: lang === 'zh' ? '数据查询与可视化' : 'Data query & visualization',
+      icon: '📊',
+      color: '#8b5cf6',
+      systemPrompt: lang === 'zh'
+        ? '你是一个数据分析 Agent，擅长处理数据相关问题。你可以：查询和过滤数据、执行统计分析、生成可视化图表、解释数据趋势和模式。请基于数据提供准确的洞察。'
+        : 'You are a Data Analyst Agent skilled at handling data-related questions. You can: query and filter data, perform statistical analysis, generate visualizations, and explain data trends and patterns. Provide accurate insights based on data.',
+      tools: ['read_file', 'search_content', 'run_command', 'web_search'],
+    },
+  ];
+
+  // 合并所有 Agent（默认 + 自定义）
+  const allAgents = [...defaultAgents, ...customAgents];
+
+  // 持久化自定义 Agent
+  useEffect(() => {
+    localStorage.setItem('forgeone_custom_agents', JSON.stringify(customAgents));
+  }, [customAgents]);
+
   // 聊天交互相关状态
   const [inputText, setInputText] = useState('');
   const [inputHistory, setInputHistory] = useState<string[]>(() => {
@@ -1858,62 +1951,78 @@ export default function App() {
   const [projectRoot] = useState('D:/project/forgeone');
   
   // 模型面板状态 - 升级为多配置 (Model Profiles) 管理
-  const [profiles, setProfiles] = useState<ModelProfile[]>(() => {
-    const saved = localStorage.getItem('model_profiles');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {}
+  const DEFAULT_PROFILES: ModelProfile[] = [
+    {
+      id: 'openai-default',
+      name: 'Official OpenAI GPT-4o',
+      type: 'official',
+      protocol: 'openai',
+      provider: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-proj-••••••••••••••••••••••••••••••••',
+      modelId: 'gpt-4o',
+      temperature: 0.2,
+      topP: 1.0,
+      maxTokens: 4096,
+      autoTruncate: true
+    },
+    {
+      id: 'anthropic-default',
+      name: 'Official Anthropic Claude 3.5',
+      type: 'official',
+      protocol: 'anthropic',
+      provider: 'Anthropic',
+      baseUrl: 'https://api.anthropic.com/v1',
+      apiKey: 'sk-ant-••••••••••••••••••••••••••••••••',
+      modelId: 'claude-3-5-sonnet',
+      temperature: 0.2,
+      topP: 1.0,
+      maxTokens: 4096,
+      autoTruncate: true
+    },
+    {
+      id: 'local-default',
+      name: 'Local Ollama Llama 3',
+      type: 'custom_simple',
+      protocol: 'openai',
+      provider: 'Ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      apiKey: '',
+      modelId: 'llama3',
+      temperature: 0.8,
+      topP: 1.0,
+      maxTokens: 2048,
+      autoTruncate: false
     }
-    return [
-      {
-        id: 'openai-default',
-        name: 'Official OpenAI GPT-4o',
-        type: 'official',
-        protocol: 'openai',
-        provider: 'OpenAI',
-        baseUrl: 'https://api.openai.com/v1',
-        apiKey: 'sk-proj-••••••••••••••••••••••••••••••••',
-        modelId: 'gpt-4o',
-        temperature: 0.2,
-        topP: 1.0,
-        maxTokens: 4096,
-        autoTruncate: true
-      },
-      {
-        id: 'anthropic-default',
-        name: 'Official Anthropic Claude 3.5',
-        type: 'official',
-        protocol: 'anthropic',
-        provider: 'Anthropic',
-        baseUrl: 'https://api.anthropic.com/v1',
-        apiKey: 'sk-ant-••••••••••••••••••••••••••••••••',
-        modelId: 'claude-3-5-sonnet',
-        temperature: 0.2,
-        topP: 1.0,
-        maxTokens: 4096,
-        autoTruncate: true
-      },
-      {
-        id: 'local-default',
-        name: 'Local Ollama Llama 3',
-        type: 'custom_simple',
-        protocol: 'openai',
-        provider: 'Ollama',
-        baseUrl: 'http://localhost:11434/v1',
-        apiKey: '',
-        modelId: 'llama3',
-        temperature: 0.8,
-        topP: 1.0,
-        maxTokens: 2048,
-        autoTruncate: false
-      }
-    ];
-  });
+  ];
 
-  const [activeProfileId, setActiveProfileId] = useState<string>(() => {
-    return localStorage.getItem('active_profile_id') || 'openai-default';
-  });
+  const [profiles, setProfiles] = useState<ModelProfile[]>(DEFAULT_PROFILES);
+  const [activeProfileId, setActiveProfileId] = useState<string>('openai-default');
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
+
+  // 启动时从文件加载配置（比 localStorage 可靠，进程重启不丢失）
+  useEffect(() => {
+    (async () => {
+      const result = await (window as any).forgeone.loadProfiles();
+      if (result?.success && result.data) {
+        try {
+          const parsed = JSON.parse(result.data);
+          setProfiles(parsed.profiles || DEFAULT_PROFILES);
+          setActiveProfileId(parsed.activeProfileId || 'openai-default');
+        } catch (e) {
+          console.error('Failed to parse saved profiles', e);
+        }
+      }
+      setProfilesLoaded(true);
+    })();
+  }, []);
+
+  // profiles 或 activeProfileId 变化时保存到文件
+  useEffect(() => {
+    if (!profilesLoaded) return;
+    const payload = JSON.stringify({ profiles, activeProfileId });
+    (window as any).forgeone.saveProfiles(payload);
+  }, [profiles, activeProfileId, profilesLoaded]);
 
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeContextWindow = activeProfile
@@ -1924,6 +2033,7 @@ export default function App() {
     ? Math.min(100, (currentContextTokens / activeContextWindow) * 100)
     : 0;
 
+  const [approvalMode, setApprovalMode] = useState<'danger' | 'approval'>('approval');
   const [showMiniSelector, setShowMiniSelector] = useState(false);
 
   // 编辑状态: null -> 主页列表, 'new' -> 新建, 字符串(id) -> 编辑现有
@@ -1955,15 +2065,7 @@ export default function App() {
   const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
   const inferredContextWindow = inferRuntimeContextWindow(formModelId, formProtocol);
 
-  // 持久化存储
-  useEffect(() => {
-    localStorage.setItem('model_profiles', JSON.stringify(profiles));
-  }, [profiles]);
-
-  useEffect(() => {
-    localStorage.setItem('active_profile_id', activeProfileId);
-  }, [activeProfileId]);
-
+  // 持久化存储（模型配置已通过 saveProfiles IPC 写入文件）
   useEffect(() => {
     localStorage.setItem('forgeone_input_history', JSON.stringify(inputHistory.slice(0, 50)));
   }, [inputHistory]);
@@ -2031,7 +2133,7 @@ export default function App() {
   ]);
 
   // 策略面板状态
-  const [maxLoops, setMaxLoops] = useState(8);
+  const [maxLoops, setMaxLoops] = useState(20);
   const [allowedTools, setAllowedTools] = useState('read_file,write_file,search_files,search_content,edit_file,glob,directory_tree,diff,shell');
   const [maxCostBudget, setMaxCostBudget] = useState(5.00);
   const [warningThreshold, setWarningThreshold] = useState(3.00);
@@ -2316,8 +2418,8 @@ export default function App() {
         token_budget: 32000,
         max_output_tokens: activeProfile?.maxTokens,
         allowed_tools: toolsArr,
-        read_roots: [projectRoot],
-        approval_read_roots: ['secrets'],
+        read_roots: approvalMode === 'danger' ? [projectRoot] : [],
+        approval_read_roots: approvalMode === 'danger' ? [] : [],
         mcp_servers: mcpServers
           .filter(server => server.status === 'connected')
           .map(server => ({
@@ -2335,9 +2437,10 @@ export default function App() {
       setSelectedConversationId(conversationId);
       setSelectedSessionId(res.state.session_id);
       
+      const isMaxLoops = res.state.stop_reason === 'max_loops_reached';
       setMessages(prev => prev.map(m => m.id === agentMessageId ? {
         ...m,
-        content: res.final_response || (res.state.pending_approval ? (lang === 'zh' ? 'Agent 执行由于触发高危工具已被 Policy Engine 挂起，正在等待您的安全审批。' : 'Agent loop suspended by Policy Engine, awaiting developer authorization.') : (lang === 'zh' ? '任务已顺利执行完成。' : 'Task successfully executed.')),
+        content: res.final_response || (res.state.pending_approval ? (lang === 'zh' ? 'Agent 执行由于触发高危工具已被 Policy Engine 挂起，正在等待您的安全审批。' : 'Agent loop suspended by Policy Engine, awaiting developer authorization.') : isMaxLoops ? (lang === 'zh' ? '已达到最大循环次数（20次），但任务可能尚未完成。您可以继续描述目标，Agent 会继续执行。' : 'Max loops (20) reached, but the task may not be complete. You can continue describing your goal and the agent will keep working.') : (lang === 'zh' ? '任务已顺利执行完成。' : 'Task successfully executed.')),
         status: res.state.status,
         streaming: false,
         trace: res.trace,
@@ -2432,30 +2535,59 @@ export default function App() {
       } : m));
       loadTraces();
     } catch (err: any) {
+      const errMsg = err?.message || (typeof err === 'string' ? err : JSON.stringify(err));
+      const isStaleSession = errMsg.includes('系统找不到指定的文件') || errMsg.includes('No such file');
       setMessages(prev => prev.map(m => m.id === agentMsgId ? {
         ...m,
-        content: `${lang === 'zh' ? '恢复执行审批出错' : 'Error resuming loop'}: ${err.message || err}`,
+        pendingApproval: isStaleSession ? null : m.pendingApproval,
+        content: isStaleSession
+          ? (lang === 'zh' ? '该审批请求已过期（会话已结束或已重启），请重新发送消息。' : 'This approval request has expired (session ended or restarted). Please send a new message.')
+          : `${lang === 'zh' ? '恢复执行审批出错' : 'Error resuming loop'}: ${errMsg}`,
+        status: isStaleSession ? 'aborted' : 'failed',
+        streaming: false,
+        runCompletedAt: Date.now(),
+      } : m));
+      if (isStaleSession) loadTraces();
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const handleReject = async (agentMsgId: string, sessionId: string) => {
+    setIsRunning(true);
+    setMessages(prev => prev.map(m => m.id === agentMsgId ? {
+      ...m,
+      pendingApproval: null,
+      status: 'running',
+      content: lang === 'zh' ? '用户拒绝了该操作。正在通知 Agent...' : 'User rejected the operation. Notifying agent...',
+      streaming: true,
+      runStartedAt: Date.now(),
+      runCompletedAt: undefined,
+    } : m));
+
+    try {
+      const res: RunResult = await (window as any).forgeone.rejectSession(sessionId);
+      setMessages(prev => prev.map(m => m.id === agentMsgId ? {
+        ...m,
+        content: res.final_response || (lang === 'zh' ? '操作已被用户拒绝。' : 'Operation rejected by user.'),
+        status: res.state.status,
+        streaming: false,
+        trace: res.trace,
+        pendingApproval: res.state.pending_approval,
+        budgetUsage: res.state.budget_usage,
+        runCompletedAt: Date.now(),
+      } : m));
+      loadTraces();
+    } catch (err: any) {
+      setMessages(prev => prev.map(m => m.id === agentMsgId ? {
+        ...m,
+        content: `${lang === 'zh' ? '拒绝操作出错' : 'Error rejecting operation'}: ${err.message || err}`,
         status: 'failed',
         streaming: false,
         runCompletedAt: Date.now(),
       } : m));
     } finally {
       setIsRunning(false);
-    }
-  };
-
-  const handleReject = async (agentMsgId: string) => {
-    try {
-      await (window as any).forgeone.prunePending();
-      setMessages(prev => prev.map(m => m.id === agentMsgId ? {
-        ...m,
-        pendingApproval: null,
-        status: 'aborted',
-        content: lang === 'zh' ? '执行已被用户拒绝并手动强行终止。' : 'Execution rejected and terminated by user.'
-      } : m));
-      loadTraces();
-    } catch (err: any) {
-      alert(`${lang === 'zh' ? '拒绝授权并终止会话失败' : 'Failed to prune session'}: ${err.message || err}`);
     }
   };
 
@@ -3039,6 +3171,14 @@ export default function App() {
           </div>
 
           <div 
+            className={`nav-item ${activeTab === 'agent' ? 'active' : ''}`}
+            onClick={() => setActiveTab('agent')}
+          >
+            <Icon name="agent" className="icon" style={{ marginRight: '8px' }} />
+            <span>{t.tabAgent}</span>
+          </div>
+
+          <div 
             className={`nav-item ${activeTab === 'project' ? 'active' : ''}`}
             onClick={() => setActiveTab('project')}
           >
@@ -3415,7 +3555,7 @@ export default function App() {
                                   type="button" 
                                   className="btn-link-action" 
                                   style={{ color: 'var(--on-surface-variant)', marginRight: '12px', fontSize: '13px' }} 
-                                  onClick={() => handleReject(activeApprovalMsg.id)}
+                                  onClick={() => handleReject(activeApprovalMsg.id, selectedSessionId || '')}
                                 >
                                   {lang === 'zh' ? '拒绝' : 'Deny'}
                                 </button>
@@ -3607,6 +3747,50 @@ export default function App() {
                           )}
                         </div>
                       </div>
+
+                      {/* 审批/危险模式切换 */}
+                      <div 
+                        className="approval-mode-toggle"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '2px',
+                          borderRadius: '6px',
+                          backgroundColor: 'var(--surface-container-high)',
+                          border: '1px solid var(--border-color)',
+                          cursor: 'pointer',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          marginRight: '8px',
+                        }}
+                        onClick={() => setApprovalMode(approvalMode === 'approval' ? 'danger' : 'approval')}
+                        title={approvalMode === 'approval' ? (lang === 'zh' ? '切换到危险模式，自动批准操作' : 'Switch to Danger Mode, auto-approve all actions') : (lang === 'zh' ? '切换到审批模式，每次操作需确认' : 'Switch to Approval Mode, confirm each action')}
+                      >
+                        <span
+                          style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            backgroundColor: approvalMode === 'approval' ? 'var(--accent-color)' : 'transparent',
+                            color: approvalMode === 'approval' ? '#fff' : 'var(--on-surface-variant)',
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          {lang === 'zh' ? '审批' : 'Safe'}
+                        </span>
+                        <span
+                          style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            backgroundColor: approvalMode === 'danger' ? '#e74c3c' : 'transparent',
+                            color: approvalMode === 'danger' ? '#fff' : 'var(--on-surface-variant)',
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          {lang === 'zh' ? '危险' : 'Danger'}
+                        </span>
+                      </div>
+
                       <div className="chat-toolbar-right">
                         <button type="submit" className="btn-send-message" disabled={isRunning || !inputText.trim()}>
                           {isRunning ? (
@@ -3624,6 +3808,214 @@ export default function App() {
                 </div>
               </div>
 
+            </div>
+          </div>
+        )}
+
+        {/* Agent 管理面板 */}
+        {activeTab === 'agent' && (
+          <div className="agent-page-layout" style={{ display: 'flex', height: '100%', width: '100%', overflow: 'hidden' }}>
+            {/* 左栏: Agent 列表 */}
+            <div className="agent-list-panel" style={{ width: '280px', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface)' }}>
+              <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                  {lang === 'zh' ? 'Agent 列表' : 'Agents'}
+                </span>
+                <span style={{ fontSize: '11px', color: 'var(--on-surface-variant)' }}>
+                  {lang === 'zh' ? '多 Agent 协作基础' : 'Multi-Agent Foundation'}
+                </span>
+              </div>
+              <div className="agent-list-scroll" style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
+                {allAgents.map((agent) => {
+                  const isCustom = customAgents.some(ca => ca.id === agent.id);
+                  return (
+                    <div
+                      key={agent.id}
+                      className={`agent-list-item ${selectedAgentId === agent.id ? 'active' : ''}`}
+                      onClick={() => setSelectedAgentId(agent.id)}
+                      style={{
+                        padding: '12px 12px 12px 12px',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                        marginBottom: '4px',
+                        backgroundColor: selectedAgentId === agent.id ? 'var(--primary-container)' : 'transparent',
+                        border: selectedAgentId === agent.id ? '1px solid var(--primary)' : '1px solid transparent',
+                        transition: 'all 0.15s ease',
+                        position: 'relative',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (selectedAgentId !== agent.id) {
+                          e.currentTarget.style.backgroundColor = 'var(--surface-container-high)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (selectedAgentId !== agent.id) {
+                          e.currentTarget.style.backgroundColor = 'transparent';
+                        }
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{
+                          width: '36px', height: '36px', borderRadius: '8px',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '16px', fontWeight: 700,
+                          backgroundColor: agent.color + '20',
+                          color: agent.color,
+                          flexShrink: 0,
+                        }}>
+                          {agent.icon}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {agent.name}
+                            {isCustom && <span style={{ fontSize: '9px', marginLeft: '4px', padding: '1px 4px', borderRadius: '3px', backgroundColor: 'var(--accent-color)', color: '#fff', verticalAlign: 'middle' }}>自定义</span>}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {agent.role}
+                          </div>
+                        </div>
+                        {isCustom && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm(lang === 'zh' ? '确定删除这个 Agent 吗？' : 'Delete this agent?')) {
+                                setCustomAgents(prev => prev.filter(ca => ca.id !== agent.id));
+                                if (selectedAgentId === agent.id) {
+                                  setSelectedAgentId('general-assistant');
+                                }
+                              }
+                            }}
+                            style={{
+                              background: 'none', border: 'none', cursor: 'pointer',
+                              color: 'var(--on-surface-variant)', padding: '4px',
+                              borderRadius: '4px', opacity: 0.5,
+                              fontSize: '14px', lineHeight: 1,
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--error)'; }}
+                            onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.color = 'var(--on-surface-variant)'; }}
+                            title={lang === 'zh' ? '删除' : 'Delete'}
+                          >
+                            <Icon name="close" style={{ fontSize: '14px' }} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ padding: '12px', borderTop: '1px solid var(--border-color)' }}>
+                <button
+                  className="btn-new-agent"
+                  style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px dashed var(--outline)', background: 'transparent', color: 'var(--primary)', cursor: 'pointer', fontSize: '12px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                  onClick={() => {
+                    setAgentForm({ ...initialFormState });
+                    setShowCreateAgentModal(true);
+                  }}
+                  title={lang === 'zh' ? '创建自定义 Agent' : 'Create Custom Agent'}
+                >
+                  <Icon name="add" style={{ fontSize: '14px' }} />
+                  {lang === 'zh' ? '创建 Agent' : 'Create Agent'}
+                </button>
+              </div>
+            </div>
+
+            {/* 右栏: Agent 详情/编辑 */}
+            <div className="agent-detail-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface-lowest)', padding: '24px', overflowY: 'auto' }}>
+              {selectedAgentId ? (
+                (() => {
+                  const agent = allAgents.find(a => a.id === selectedAgentId)!;
+                  const isCustom = customAgents.some(ca => ca.id === agent.id);
+                  return (
+                    <div style={{ maxWidth: '600px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '24px' }}>
+                        <div style={{
+                          width: '56px', height: '56px', borderRadius: '14px',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '24px', fontWeight: 700,
+                          backgroundColor: agent.color + '20',
+                          color: agent.color,
+                        }}>
+                          {agent.icon}
+                        </div>
+                        <div>
+                          <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 700, color: 'var(--on-surface)' }}>{agent.name}</h2>
+                          <p style={{ margin: '4px 0 0', fontSize: '13px', color: 'var(--on-surface-variant)' }}>{agent.role}</p>
+                        </div>
+                        {isCustom && (
+                          <button
+                            onClick={() => {
+                              setAgentForm({
+                                name: agent.name,
+                                avatar: agent.icon,
+                                systemPrompt: agent.systemPrompt,
+                                temperature: agent.temperature ?? 0.5,
+                                modelId: agent.modelId ?? '',
+                                tools: [...agent.tools],
+                                maxIterations: agent.maxIterations ?? 5,
+                                editingId: agent.id,
+                              });
+                              setShowCreateAgentModal(true);
+                            }}
+                            style={{
+                              marginLeft: 'auto', padding: '6px 12px',
+                              borderRadius: '6px', border: '1px solid var(--outline)',
+                              background: 'transparent', color: 'var(--on-surface-variant)',
+                              cursor: 'pointer', fontSize: '11px', fontWeight: 500,
+                              display: 'flex', alignItems: 'center', gap: '4px',
+                            }}
+                          >
+                            <Icon name="settings" style={{ fontSize: '12px' }} />
+                            {lang === 'zh' ? '编辑' : 'Edit'}
+                          </button>
+                        )}
+                      </div>
+
+                      <div style={{ marginBottom: '24px' }}>
+                        <h3 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)', marginBottom: '8px' }}>
+                          {lang === 'zh' ? '角色描述' : 'System Prompt'}
+                        </h3>
+                        <div style={{
+                          padding: '16px', borderRadius: '8px',
+                          backgroundColor: 'var(--surface-container)',
+                          fontSize: '13px', lineHeight: 1.6,
+                          color: 'var(--on-surface)',
+                          whiteSpace: 'pre-wrap',
+                        }}>
+                          {agent.systemPrompt}
+                        </div>
+                      </div>
+
+                      <div style={{ marginBottom: '24px' }}>
+                        <h3 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)', marginBottom: '8px' }}>
+                          {lang === 'zh' ? '可用工具' : 'Available Tools'}
+                        </h3>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {(agent.tools || []).map((tool: string) => (
+                            <span key={tool} style={{
+                              padding: '4px 10px', borderRadius: '12px',
+                              fontSize: '11px', fontWeight: 500,
+                              backgroundColor: 'var(--secondary-container)',
+                              color: 'var(--on-secondary-container)',
+                            }}>
+                              {tool}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--on-surface-variant)' }}>
+                  <Icon name="agent" style={{ fontSize: '48px', opacity: 0.3, marginBottom: '16px' }} />
+                  <p style={{ fontSize: '14px', fontWeight: 500 }}>
+                    {lang === 'zh' ? '选择一个 Agent 查看详情' : 'Select an Agent to view details'}
+                  </p>
+                  <p style={{ fontSize: '12px', marginTop: '4px' }}>
+                    {lang === 'zh' ? '或点击左下角创建自定义 Agent' : 'Or create a custom Agent below'}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -5497,6 +5889,238 @@ export default function App() {
                 }}
               >
                 {t.setSaveBtn}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent 创建/编辑 Modal */}
+      {showCreateAgentModal && (
+        <div className="modal-overlay" onClick={() => setShowCreateAgentModal(false)}>
+          <div className="modal-card" style={{ maxWidth: '640px', width: '90%' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                {agentForm.editingId ? (lang === 'zh' ? '编辑 Agent' : 'Edit Agent') : (lang === 'zh' ? '创建 Agent' : 'Create Agent')}
+              </span>
+              <button className="modal-close-btn" onClick={() => setShowCreateAgentModal(false)}>
+                <Icon name="close" style={{ fontSize: '18px' }} />
+              </button>
+            </div>
+
+            <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+              {/* Section 1: 身份与人设 */}
+              <div style={{ marginBottom: '28px' }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--on-surface)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ width: '4px', height: '14px', borderRadius: '2px', backgroundColor: 'var(--primary)', display: 'inline-block' }}></span>
+                  {lang === 'zh' ? '身份与人设' : 'Identity & Persona'}
+                </h3>
+                <p style={{ fontSize: '11px', color: 'var(--on-surface-variant)', marginBottom: '16px', marginLeft: '10px' }}>
+                  {lang === 'zh' ? '定义 Agent 的身份标识、行为风格与核心指令。' : 'Define the agent\'s identity, behavior style, and core instructions.'}
+                </p>
+
+                {/* Agent 名称 */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? 'Agent 名称' : 'Agent Name'} <span style={{ color: 'var(--error)' }}>*</span>
+                  </label>
+                  <input
+                    className="form-input-text"
+                    type="text"
+                    placeholder={lang === 'zh' ? '给 Agent 起个名字...' : 'Name your agent...'}
+                    value={agentForm.name}
+                    onChange={e => setAgentForm(prev => ({ ...prev, name: e.target.value }))}
+                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface)', color: 'var(--on-surface)', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }}
+                  />
+                </div>
+
+                {/* Agent 头像 */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? 'Agent 头像' : 'Avatar'}
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {AVAILABLE_AVATARS.map(emoji => (
+                      <div
+                        key={emoji}
+                        onClick={() => setAgentForm(prev => ({ ...prev, avatar: emoji }))}
+                        style={{
+                          width: '40px', height: '40px', borderRadius: '8px',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '20px', cursor: 'pointer',
+                          backgroundColor: agentForm.avatar === emoji ? 'var(--primary-container)' : 'var(--surface-container)',
+                          border: agentForm.avatar === emoji ? '2px solid var(--primary)' : '2px solid transparent',
+                          transition: 'all 0.1s ease',
+                        }}
+                      >
+                        {emoji}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* System Prompt */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? '角色描述 / 系统提示词' : 'System Prompt'} <span style={{ color: 'var(--error)' }}>*</span>
+                  </label>
+                  <textarea
+                    className="form-input-text"
+                    placeholder={lang === 'zh' ? '描述 Agent 的角色、行为准则和限制...' : 'Describe the agent\'s role, behavior, and constraints...'}
+                    value={agentForm.systemPrompt}
+                    onChange={e => setAgentForm(prev => ({ ...prev, systemPrompt: e.target.value }))}
+                    rows={6}
+                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface)', color: 'var(--on-surface)', fontSize: '13px', outline: 'none', resize: 'vertical', fontFamily: 'var(--font-mono)', boxSizing: 'border-box' }}
+                  />
+                </div>
+
+                {/* Temperature 滑块 */}
+                <div className="form-group" style={{ marginBottom: '8px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? '对话风格 / Temperature' : 'Tone / Temperature'}
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <input
+                      type="range"
+                      min="0"
+                      max="0.9"
+                      step="0.1"
+                      value={agentForm.temperature}
+                      onChange={e => setAgentForm(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
+                      style={{ flex: 1, accentColor: 'var(--primary)' }}
+                    />
+                    <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)', minWidth: '32px', textAlign: 'center', fontFamily: 'var(--font-mono)' }}>
+                      {agentForm.temperature.toFixed(1)}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--on-surface-variant)', marginTop: '2px' }}>
+                    <span>{lang === 'zh' ? '严谨 (0.0)' : 'Precise (0.0)'}</span>
+                    <span>{lang === 'zh' ? '折中 (0.5)' : 'Balanced (0.5)'}</span>
+                    <span>{lang === 'zh' ? '创造性 (0.9)' : 'Creative (0.9)'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: 能力与运行时 */}
+              <div style={{ marginBottom: '16px' }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--on-surface)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ width: '4px', height: '14px', borderRadius: '2px', backgroundColor: 'var(--primary)', display: 'inline-block' }}></span>
+                  {lang === 'zh' ? '能力与运行时' : 'Capabilities & Runtime'}
+                </h3>
+                <p style={{ fontSize: '11px', color: 'var(--on-surface-variant)', marginBottom: '16px', marginLeft: '10px' }}>
+                  {lang === 'zh' ? '绑定模型、工具与执行参数。' : 'Bind model, tools, and execution parameters.'}
+                </p>
+
+                {/* 绑定模型 */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? '绑定模型' : 'LLM Model'} <span style={{ color: 'var(--error)' }}>*</span>
+                  </label>
+                  <select
+                    className="form-select"
+                    value={agentForm.modelId}
+                    onChange={e => setAgentForm(prev => ({ ...prev, modelId: e.target.value }))}
+                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface)', color: 'var(--on-surface)', fontSize: '13px', outline: 'none' }}
+                  >
+                    <option value="">{lang === 'zh' ? '-- 选择模型 --' : '-- Select Model --'}</option>
+                    {profiles.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.modelId})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 可用工具 */}
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? '可用工具' : 'Available Tools'}
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {allowedTools.split(',').map(t => t.trim()).filter(Boolean).map(tool => {
+                      const checked = agentForm.tools.includes(tool);
+                      return (
+                        <div
+                          key={tool}
+                          onClick={() => setAgentForm(prev => ({
+                            ...prev,
+                            tools: checked
+                              ? prev.tools.filter(t => t !== tool)
+                              : [...prev.tools, tool]
+                          }))}
+                          style={{
+                            padding: '6px 12px', borderRadius: '16px', cursor: 'pointer',
+                            fontSize: '12px', fontWeight: 500, userSelect: 'none',
+                            backgroundColor: checked ? 'var(--primary-container)' : 'var(--surface-container)',
+                            color: checked ? 'var(--primary)' : 'var(--on-surface-variant)',
+                            border: checked ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                            transition: 'all 0.1s ease',
+                          }}
+                        >
+                          {tool}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 最大思考步数 */}
+                <div className="form-group" style={{ marginBottom: '8px' }}>
+                  <label className="form-label" style={{ display: 'block', marginBottom: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)' }}>
+                    {lang === 'zh' ? '最大思考步数' : 'Max Iterations'}
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={agentForm.maxIterations}
+                      onChange={e => setAgentForm(prev => ({ ...prev, maxIterations: Math.max(1, parseInt(e.target.value) || 1) }))}
+                      style={{ width: '80px', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface)', color: 'var(--on-surface)', fontSize: '13px', outline: 'none', fontFamily: 'var(--font-mono)' }}
+                    />
+                    <span style={{ fontSize: '11px', color: 'var(--on-surface-variant)' }}>
+                      {lang === 'zh' ? '防止 Agent 工具调用死循环' : 'Prevent infinite tool call loops'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn-secondary" onClick={() => setShowCreateAgentModal(false)}>
+                {t.setCancelBtn}
+              </button>
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  if (!agentForm.name.trim() || !agentForm.systemPrompt.trim()) {
+                    alert(lang === 'zh' ? '请填写 Agent 名称和系统提示词' : 'Please fill in Agent name and system prompt');
+                    return;
+                  }
+                  const isEditing = !!agentForm.editingId;
+                  const newAgent = {
+                    id: isEditing ? agentForm.editingId : 'custom_' + Date.now(),
+                    name: agentForm.name.trim(),
+                    role: agentForm.systemPrompt.trim().slice(0, 40) + '...',
+                    icon: agentForm.avatar,
+                    color: '#6366f1',
+                    temperature: agentForm.temperature,
+                    modelId: agentForm.modelId,
+                    maxIterations: agentForm.maxIterations,
+                    systemPrompt: agentForm.systemPrompt.trim(),
+                    tools: [...agentForm.tools],
+                    isCustom: true,
+                  };
+                  if (isEditing) {
+                    setCustomAgents(prev => prev.map(a => a.id === agentForm.editingId ? newAgent : a));
+                  } else {
+                    setCustomAgents(prev => [...prev, newAgent]);
+                  }
+                  setShowCreateAgentModal(false);
+                  setSelectedAgentId(newAgent.id);
+                }}
+              >
+                {agentForm.editingId ? (lang === 'zh' ? '保存更改' : 'Save Changes') : (lang === 'zh' ? '创建' : 'Create')}
               </button>
             </div>
           </div>
