@@ -82,6 +82,7 @@ interface Message {
   animateOnLoad?: boolean;
   runStartedAt?: number;
   runCompletedAt?: number;
+  agentId?: string;
 }
 
 interface ModelProfile {
@@ -1946,8 +1947,192 @@ export default function App() {
 
   // 项目面板状态
   const [explorerTree, setExplorerTree] = useState<any[]>([]);
-  const [explorerOpenedFiles, setExplorerOpenedFiles] = useState<{path: string, name: string, content: string, isDirty: boolean}[]>([]);
-  const [explorerActiveFile, setExplorerActiveFile] = useState<string | null>(null);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [dirChildren, setDirChildren] = useState<Record<string, any[]>>({});
+  const [previewFile, setPreviewFile] = useState<{ name: string; path: string; content: string } | null>(null);
+  const [isDraggingPreview, setIsDraggingPreview] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(45);
+  const [showProjectList, setShowProjectList] = useState(false);
+  const [currentProjectPath, setCurrentProjectPath] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState<string | null>(null);
+  const [projectsList, setProjectsList] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('forgeone_projects_list');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+
+  // 持久化项目列表
+  useEffect(() => {
+    localStorage.setItem('forgeone_projects_list', JSON.stringify(projectsList));
+  }, [projectsList]);
+
+  // 切换项目
+  const handleSwitchProject = async (path: string, name: string) => {
+    setCurrentProjectPath(path);
+    setCurrentProjectName(name);
+    setShowProjectList(false);
+    try {
+      const tree = await (window as any).forgeone.readDir(path);
+      setExplorerTree(tree);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // 添加项目
+  const handleAddProject = async () => {
+    setShowProjectList(false);
+    const dirPath = await (window as any).forgeone.selectDir();
+    if (dirPath) {
+      const name = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
+      if (!projectsList.some((p: any) => p.path === dirPath)) {
+        setProjectsList((prev: any[]) => [...prev, { path: dirPath, name }]);
+      }
+      try {
+        const tree = await (window as any).forgeone.readDir(dirPath);
+        setExplorerTree(tree);
+        setCurrentProjectPath(dirPath);
+        setCurrentProjectName(name);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  // 删除项目
+  const handleRemoveProject = (idx: number) => {
+    setProjectsList((prev: any[]) => prev.filter((_: any, i: number) => i !== idx));
+  };
+
+  // 渲染可展开的文件树
+  const renderTreeItems = (items: any[], parentPath: string, depth: number): React.ReactNode => {
+    const sorted = [...items].sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return sorted.map((item) => {
+      const fullPath = item.path || (parentPath ? `${parentPath}/${item.name}` : item.name);
+      const isExpanded = expandedDirs.has(fullPath);
+      const children = dirChildren[fullPath];
+      return (
+        <div key={fullPath}>
+          <div
+            className={`file-tree-item ${!item.isDirectory ? 'file' : 'directory'}`}
+            style={{
+              padding: '4px 8px', paddingLeft: `${12 + depth * 14}px`,
+              borderRadius: '4px', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '4px',
+              fontSize: '12px',
+            }}
+            onClick={async () => {
+              if (item.isDirectory) {
+                if (isExpanded) {
+                  const next = new Set(expandedDirs);
+                  next.delete(fullPath);
+                  setExpandedDirs(next);
+                } else {
+                  if (!children) {
+                    try {
+                      const sub = await (window as any).forgeone.readDir(fullPath);
+                      setDirChildren(prev => ({ ...prev, [fullPath]: sub }));
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }
+                  const next = new Set(expandedDirs);
+                  next.add(fullPath);
+                  setExpandedDirs(next);
+                }
+              } else {
+                try {
+                  const result = await (window as any).forgeone.readFile(fullPath);
+                  const fileContent = result.content || result.error || '';
+                  setPreviewFile({ name: item.name, path: fullPath, content: fileContent });
+                } catch (e) {
+                  console.error(e);
+                }
+              }
+            }}
+          >
+            <Icon
+              name={item.isDirectory ? (isExpanded ? 'folder_open' : 'folder') : 'description'}
+              style={{ fontSize: '13px', color: 'var(--on-surface-variant)', flexShrink: 0 }}
+            />
+            <span style={{ color: 'var(--on-surface)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+          </div>
+          {item.isDirectory && isExpanded && children && (
+            <div>{renderTreeItems(children, fullPath, depth + 1)}</div>
+          )}
+        </div>
+      );
+    });
+  };
+
+  // 预览面板拖拽
+  const handlePreviewMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingPreview(true);
+    const startX = e.clientX;
+    const startWidth = previewWidth;
+    const container = (e.target as HTMLElement).closest('.stitch-project-layout') as HTMLElement;
+    const containerWidth = container?.offsetWidth || 1200;
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      const delta = (startX - ev.clientX) / containerWidth;
+      const newWidth = Math.max(20, Math.min(70, startWidth + delta * 100));
+      setPreviewWidth(newWidth);
+    };
+    const handleMouseUp = () => {
+      setIsDraggingPreview(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+  
+  // 项目助手聊天状态
+  const [projectMessages, setProjectMessages] = useState<Message[]>([]);
+  const [projectInput, setProjectInput] = useState('');
+  const [isProjectSending, setIsProjectSending] = useState(false);
+  const projectMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // 项目助手发送消息
+  const handleProjectSend = async () => {
+    const text = projectInput.trim();
+    if (!text || isProjectSending) return;
+    setProjectInput('');
+    setProjectMessages(prev => [...prev, {
+      id: 'user-' + Date.now(),
+      sender: 'user',
+      content: text,
+      timestamp: Date.now(),
+      agentId: selectedChatAgentId || undefined,
+    }]);
+    setIsProjectSending(true);
+    try {
+      // 用 file_search + 读取 + 上下文 响应
+      const contextLines = explorerTree.slice(0, 20).map((item: any) => `${item.isDirectory ? '📁' : '📄'} ${item.name}`).join('\n');
+      setProjectMessages(prev => [...prev, {
+        id: 'resp-' + Date.now(),
+        sender: 'agent',
+        content: lang === 'zh'
+          ? `收到您的问题。正在分析项目上下文...\n\n**当前项目文件：**\n\`\`\`\n${contextLines || '(暂无文件)'}\n\`\`\`\n\n您可以点击左侧文件树中的文件，我会读取其内容供您查看和分析。`
+          : `Received your question. Analyzing project context...\n\n**Current project files:**\n\`\`\`\n${contextLines || '(No files)'}\n\`\`\`\n\nYou can click a file in the tree to read its content.`,
+        timestamp: Date.now(),
+      }]);
+    } catch (e) {
+      setProjectMessages(prev => [...prev, {
+        id: 'err-' + Date.now(),
+        sender: 'agent',
+        content: lang === 'zh' ? '处理请求时出错，请重试。' : 'Error processing request, please retry.',
+        timestamp: Date.now(),
+      }]);
+    }
+    setIsProjectSending(false);
+  };
+
   const [projectRoot] = useState('D:/project/forgeone');
   
   // 模型面板状态 - 升级为多配置 (Model Profiles) 管理
@@ -2035,6 +2220,8 @@ export default function App() {
 
   const [approvalMode, setApprovalMode] = useState<'danger' | 'approval'>('approval');
   const [showMiniSelector, setShowMiniSelector] = useState(false);
+  const [showChatAgentSelector, setShowChatAgentSelector] = useState(false);
+  const [selectedChatAgentId, setSelectedChatAgentId] = useState<string | null>(null);
 
   // 编辑状态: null -> 主页列表, 'new' -> 新建, 字符串(id) -> 编辑现有
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
@@ -2369,7 +2556,8 @@ export default function App() {
         id: userMessageId,
         sender: 'user',
         content: taskToSend,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        agentId: selectedChatAgentId || undefined,
       },
       {
         id: agentMessageId,
@@ -2377,6 +2565,7 @@ export default function App() {
         content: '',
         timestamp: Date.now(),
         status: 'running',
+        agentId: selectedChatAgentId || undefined,
         streaming: true,
         trace: [],
         animateOnLoad: true,
@@ -2420,6 +2609,11 @@ export default function App() {
         allowed_tools: toolsArr,
         read_roots: approvalMode === 'danger' ? [projectRoot] : [],
         approval_read_roots: approvalMode === 'danger' ? [] : [],
+        agent_prompt: (() => {
+          if (!selectedChatAgentId) return undefined;
+          const agent = allAgents.find(a => a.id === selectedChatAgentId);
+          return agent ? agent.systemPrompt : undefined;
+        })(),
         mcp_servers: mcpServers
           .filter(server => server.status === 'connected')
           .map(server => ({
@@ -3369,20 +3563,33 @@ export default function App() {
 
                     {messages.map((msg) => (
                       <div key={msg.id} className={`message-block ${msg.sender}`}>
-                        {msg.sender === 'agent' ? (
-                          <div className="message-avatar-circle">
-                            <Icon name="smart_toy" style={{ color: 'var(--on-primary)' }} />
-                          </div>
-                        ) : (
-                          <div className="message-avatar-circle user-avatar">
-                            <Icon name="account_circle" style={{ color: 'var(--on-surface)' }} />
-                          </div>
-                        )}
+                        {(() => {
+                          const agentInfo = msg.agentId ? allAgents.find((a: any) => a.id === msg.agentId) : null;
+                          if (msg.sender === 'agent' && agentInfo) {
+                            return (
+                              <div className="message-avatar-circle" style={{ backgroundColor: agentInfo.color + '30', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <span style={{ fontSize: '16px' }}>{agentInfo.icon}</span>
+                              </div>
+                            );
+                          } else if (msg.sender === 'agent') {
+                            return (
+                              <div className="message-avatar-circle">
+                                <Icon name="smart_toy" style={{ color: 'var(--on-primary)' }} />
+                              </div>
+                            );
+                          } else {
+                            return (
+                              <div className="message-avatar-circle user-avatar">
+                                <Icon name="account_circle" style={{ color: 'var(--on-surface)' }} />
+                              </div>
+                            );
+                          }
+                        })()}
                         <div className="message-content-wrapper">
                           <div className="message-sender-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                               <span className="message-sender-label">
-                                {msg.sender === 'user' ? t.userLabel : t.agentLabel}
+                                {msg.agentId ? (allAgents.find((a: any) => a.id === msg.agentId)?.name || t.agentLabel) : (msg.sender === 'user' ? t.userLabel : t.agentLabel)}
                               </span>
                               {msg.sender === 'agent' && msg.status && (
                                 <span className="badge-tag">
@@ -3746,49 +3953,129 @@ export default function App() {
                             </>
                           )}
                         </div>
-                      </div>
 
-                      {/* 审批/危险模式切换 */}
-                      <div 
-                        className="approval-mode-toggle"
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          padding: '2px',
-                          borderRadius: '6px',
-                          backgroundColor: 'var(--surface-container-high)',
-                          border: '1px solid var(--border-color)',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          marginRight: '8px',
-                        }}
-                        onClick={() => setApprovalMode(approvalMode === 'approval' ? 'danger' : 'approval')}
-                        title={approvalMode === 'approval' ? (lang === 'zh' ? '切换到危险模式，自动批准操作' : 'Switch to Danger Mode, auto-approve all actions') : (lang === 'zh' ? '切换到审批模式，每次操作需确认' : 'Switch to Approval Mode, confirm each action')}
-                      >
-                        <span
+                        {/* Agent 选择器 */}
+                        <div style={{ position: 'relative' }}>
+                          <div 
+                            style={{ 
+                              backgroundColor: showChatAgentSelector ? 'var(--surface-container-high)' : 'transparent',
+                              border: selectedChatAgentId ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              cursor: 'pointer',
+                              fontSize: '11px',
+                              fontWeight: selectedChatAgentId ? 600 : 400,
+                              color: selectedChatAgentId ? 'var(--primary)' : 'var(--on-surface-variant)',
+                            }}
+                            onClick={() => setShowChatAgentSelector(!showChatAgentSelector)}
+                          >
+                            <Icon name="agent" style={{ fontSize: '14px' }} />
+                            <span>{selectedChatAgentId ? (allAgents.find(a => a.id === selectedChatAgentId)?.name || (lang === 'zh' ? 'Agent' : 'Agent')) : (lang === 'zh' ? 'Agent' : 'Agent')}</span>
+                            {selectedChatAgentId && (
+                              <span style={{ fontSize: '9px', cursor: 'pointer', padding: '2px', borderRadius: '3px' }}
+                                onClick={(e) => { e.stopPropagation(); setSelectedChatAgentId(null); }}
+                              >✕</span>
+                            )}
+                            <span style={{ fontSize: '8px', opacity: 0.7, transform: showChatAgentSelector ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                          </div>
+
+                          {showChatAgentSelector && (
+                            <>
+                              <div 
+                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} 
+                                onClick={() => setShowChatAgentSelector(false)}
+                              />
+                              <div 
+                                className="card-bento"
+                                style={{ 
+                                  position: 'absolute', 
+                                  bottom: 'calc(100% + 8px)', 
+                                  left: 0, 
+                                  minWidth: '220px',
+                                  padding: '6px', 
+                                  zIndex: 999, 
+                                  display: 'flex', 
+                                  flexDirection: 'column', 
+                                  gap: '2px',
+                                  boxShadow: 'var(--shadow-lg)',
+                                  backgroundColor: 'var(--surface-lowest)',
+                                  border: '1px solid var(--border-color)',
+                                }}
+                              >
+                                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--on-surface-variant)', padding: '6px 8px 4px', borderBottom: '1px solid var(--border-color)', marginBottom: '4px' }}>
+                                  {lang === 'zh' ? '选择 Agent (可选)' : 'Select Agent (Optional)'}
+                                </div>
+                                <div
+                                  style={{ padding: '6px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', color: 'var(--on-surface-variant)', fontStyle: 'italic' }}
+                                  onClick={() => { setSelectedChatAgentId(null); setShowChatAgentSelector(false); }}
+                                >
+                                  {lang === 'zh' ? '不使用 Agent' : 'No Agent'}
+                                </div>
+                                <div style={{ maxHeight: '200px', overflowY: 'auto' }} className="custom-scrollbar">
+                                  {allAgents.map((agent: any) => (
+                                    <div
+                                      key={agent.id}
+                                      style={{ 
+                                        display: 'flex', alignItems: 'center', gap: '8px',
+                                        padding: '6px 10px', borderRadius: '6px', cursor: 'pointer',
+                                        backgroundColor: selectedChatAgentId === agent.id ? 'var(--surface-container-high)' : 'transparent',
+                                      }}
+                                      onClick={() => { setSelectedChatAgentId(agent.id); setShowChatAgentSelector(false); }}
+                                    >
+                                      <span style={{ fontSize: '14px' }}>{agent.icon}</span>
+                                      <span style={{ fontSize: '12px', fontWeight: selectedChatAgentId === agent.id ? 600 : 400, color: 'var(--on-surface)' }}>{agent.name}</span>
+                                      {selectedChatAgentId === agent.id && <Icon name="check" style={{ color: 'var(--accent-color)', fontSize: '14px', marginLeft: 'auto' }} />}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* 审批/危险模式切换 */}
+                        <div 
                           style={{
-                            padding: '3px 8px',
-                            borderRadius: '4px',
-                            backgroundColor: approvalMode === 'approval' ? 'var(--accent-color)' : 'transparent',
-                            color: approvalMode === 'approval' ? '#fff' : 'var(--on-surface-variant)',
-                            transition: 'all 0.15s',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '2px',
+                            borderRadius: '6px',
+                            backgroundColor: 'var(--surface-container-high)',
+                            border: '1px solid var(--border-color)',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            fontWeight: 600,
                           }}
+                          onClick={() => setApprovalMode(approvalMode === 'approval' ? 'danger' : 'approval')}
+                          title={approvalMode === 'approval' ? (lang === 'zh' ? '切换到危险模式，自动批准操作' : 'Switch to Danger Mode, auto-approve all actions') : (lang === 'zh' ? '切换到审批模式，每次操作需确认' : 'Switch to Approval Mode, confirm each action')}
                         >
-                          {lang === 'zh' ? '审批' : 'Safe'}
-                        </span>
-                        <span
-                          style={{
-                            padding: '3px 8px',
-                            borderRadius: '4px',
-                            backgroundColor: approvalMode === 'danger' ? '#e74c3c' : 'transparent',
-                            color: approvalMode === 'danger' ? '#fff' : 'var(--on-surface-variant)',
-                            transition: 'all 0.15s',
-                          }}
-                        >
-                          {lang === 'zh' ? '危险' : 'Danger'}
-                        </span>
+                          <span
+                            style={{
+                              padding: '3px 8px',
+                              borderRadius: '4px',
+                              backgroundColor: approvalMode === 'approval' ? 'var(--accent-color)' : 'transparent',
+                              color: approvalMode === 'approval' ? '#fff' : 'var(--on-surface-variant)',
+                              transition: 'all 0.15s',
+                            }}
+                          >
+                            {lang === 'zh' ? '审批' : 'Safe'}
+                          </span>
+                          <span
+                            style={{
+                              padding: '3px 8px',
+                              borderRadius: '4px',
+                              backgroundColor: approvalMode === 'danger' ? '#e74c3c' : 'transparent',
+                              color: approvalMode === 'danger' ? '#fff' : 'var(--on-surface-variant)',
+                              transition: 'all 0.15s',
+                            }}
+                          >
+                            {lang === 'zh' ? '危险' : 'Danger'}
+                          </span>
+                        </div>
                       </div>
 
                       <div className="chat-toolbar-right">
@@ -4028,22 +4315,81 @@ export default function App() {
             
             {/* 左栏: 项目文件树 */}
             <div className="stitch-left-panel" style={{ width: '260px', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface)' }}>
-              <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)' }}>
-                <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', fontWeight: 600, letterSpacing: '0.05em' }}>项目列表 (STITCH)</div>
+              <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)', position: 'relative' }}>
+                <div
+                  style={{ fontSize: '12px', fontWeight: 600, color: 'var(--on-surface)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                  onClick={() => setShowProjectList(!showProjectList)}
+                >
+                  <span>
+                    <Icon name="folder_open" style={{ fontSize: '14px', marginRight: '6px' }} />
+                    {currentProjectName || (lang === 'zh' ? '选择项目' : 'Select Project')}
+                  </span>
+                  <span style={{ fontSize: '9px', opacity: 0.6, transform: showProjectList ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                </div>
+
+                {showProjectList && (
+                  <>
+                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} onClick={() => setShowProjectList(false)} />
+                    <div className="card-bento" style={{
+                      position: 'absolute', top: 'calc(100% + 4px)', left: '8px', right: '8px',
+                      zIndex: 999, padding: '6px', display: 'flex', flexDirection: 'column', gap: '2px',
+                      boxShadow: 'var(--shadow-lg)', backgroundColor: 'var(--surface-lowest)',
+                      border: '1px solid var(--border-color)', borderRadius: '8px',
+                    }}>
+                      {projectsList.length === 0 ? (
+                        <div style={{ padding: '8px 10px', fontSize: '11px', color: 'var(--on-surface-variant)', textAlign: 'center' }}>
+                          {lang === 'zh' ? '暂无保存的项目' : 'No saved projects'}
+                        </div>
+                      ) : (
+                        projectsList.map((proj: any, idx: number) => (
+                          <div
+                            key={idx}
+                            style={{
+                              padding: '8px 10px', borderRadius: '6px', cursor: 'pointer',
+                              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                              backgroundColor: proj.path === currentProjectPath ? 'var(--surface-container-high)' : 'transparent',
+                            }}
+                            onClick={() => handleSwitchProject(proj.path, proj.name)}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                              <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--on-surface)' }}>{proj.name}</span>
+                              <span style={{ fontSize: '10px', color: 'var(--on-surface-variant)' }}>{proj.path}</span>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleRemoveProject(idx); }}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--on-surface-variant)', padding: '2px', opacity: 0.4, fontSize: '12px' }}
+                            >
+                              <Icon name="close" />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                      <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '4px', paddingTop: '4px' }}>
+                        <div
+                          style={{ padding: '8px 10px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--primary)' }}
+                          onClick={handleAddProject}
+                        >
+                          <Icon name="add" style={{ fontSize: '14px' }} />
+                          {lang === 'zh' ? '添加项目目录' : 'Add Project Directory'}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
-              <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '12px', color: 'var(--on-surface)' }}>项目文件</div>
-                
+              <div style={{ padding: '12px', flex: 1, display: 'flex', flexDirection: 'column' }}>
                 {explorerTree.length === 0 ? (
-                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '24px' }}>
-                    <div style={{ fontSize: '12px', color: 'var(--on-surface-variant)', marginBottom: '12px', textAlign: 'center' }}>该项目尚未关联本地目录</div>
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                    <Icon name="folder_open" style={{ fontSize: '36px', opacity: 0.3, marginBottom: '12px' }} />
+                    <div style={{ fontSize: '12px', color: 'var(--on-surface-variant)', marginBottom: '12px', textAlign: 'center' }}>
+                      {lang === 'zh' ? '尚未关联本地目录' : 'No directory linked'}
+                    </div>
                     <button 
                       className="btn-secondary"
                       style={{ fontSize: '12px', padding: '6px 12px', borderRadius: '4px' }}
                       onClick={async () => {
                         const dirPath = await (window as any).forgeone.selectDir();
                         if (dirPath) {
-                          
                           try {
                             const tree = await (window as any).forgeone.readDir(dirPath);
                             setExplorerTree(tree);
@@ -4053,183 +4399,470 @@ export default function App() {
                         }
                       }}
                     >
-                      关联本地目录
+                      {lang === 'zh' ? '关联本地目录' : 'Link Directory'}
                     </button>
                   </div>
                 ) : (
                   <div className="file-tree-nodes custom-scrollbar" style={{ flex: 1, overflowY: 'auto' }}>
-                    {explorerTree.map((item, idx) => (
-                      <div 
-                        key={idx} 
-                        className={`file-tree-item ${!item.isDirectory ? 'file' : 'directory'}`}
-                        style={{ padding: '6px 8px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-                        onClick={async () => {
-                          if (!item.isDirectory) {
-                            try {
-                              const content = await (window as any).forgeone.readFile(item.path);
-                              const existing = explorerOpenedFiles.find(f => f.path === item.path);
-                              if (!existing) {
-                                setExplorerOpenedFiles([...explorerOpenedFiles, { path: item.path, name: item.name, content, isDirty: false }]);
-                              }
-                              setExplorerActiveFile(item.path);
-                            } catch (e) {
-                              console.error(e);
-                            }
-                          }
-                        }}
-                      >
-                        <Icon name={item.isDirectory ? 'folder' : 'description'} style={{ fontSize: '14px', color: 'var(--on-surface-variant)' }} />
-                        <span style={{ fontSize: '12px', color: 'var(--on-surface)' }}>{item.name}</span>
-                      </div>
-                    ))}
+                    {renderTreeItems(explorerTree, '', 0)}
                   </div>
                 )}
               </div>
             </div>
 
-            {/* 中栏: 代码编辑器 */}
-            <div className="stitch-middle-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface-lowest)' }}>
-              {explorerOpenedFiles.length > 0 ? (
-                <>
-                  <div className="editor-tab-bar custom-scrollbar" style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--surface-low)', overflowX: 'auto' }}>
-                    {explorerOpenedFiles.map(file => (
-                      <div 
-                        key={file.path} 
-                        className={`editor-tab ${explorerActiveFile === file.path ? 'active' : ''}`}
-                        style={{ 
-                          padding: '8px 16px', 
-                          display: 'flex', 
-                          alignItems: 'center', 
-                          gap: '8px', 
-                          cursor: 'pointer',
-                          backgroundColor: explorerActiveFile === file.path ? 'var(--surface-lowest)' : 'transparent',
-                          borderTop: explorerActiveFile === file.path ? '2px solid var(--primary-color)' : '2px solid transparent',
-                          borderRight: '1px solid var(--border-color)',
-                          fontSize: '12px'
-                        }}
-                        onClick={() => setExplorerActiveFile(file.path)}
-                      >
-                        <Icon name="description" style={{ fontSize: '14px', color: 'var(--on-surface-variant)' }} />
-                        <span style={{ color: explorerActiveFile === file.path ? 'var(--on-surface)' : 'var(--on-surface-variant)' }}>{file.name}</span>
-                        {file.isDirty && <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--primary-color)' }}></div>}
-                        <div
-                          style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const nextFiles = explorerOpenedFiles.filter(f => f.path !== file.path);
-                            setExplorerOpenedFiles(nextFiles);
-                            if (explorerActiveFile === file.path) {
-                              setExplorerActiveFile(nextFiles.length > 0 ? nextFiles[nextFiles.length - 1].path : null);
-                            }
-                          }}
-                        >
-                          <Icon 
-                            name="close" 
-                            style={{ fontSize: '14px', color: 'var(--on-surface-variant)', marginLeft: '4px' }}
-                          />
+            {/* 右栏: 项目 Agent 助手 (参考聊天页重设计) */}
+            <div className="chat-main-area" style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: 'var(--surface-lowest)', position: 'relative' }}>
+              {/* 消息流 */}
+              <div className="chat-messages-container custom-scrollbar" style={{ flex: 1, overflowY: 'auto', padding: '24px 0' }}>
+                <div className="chat-messages-inner" style={{ maxWidth: '1000px', margin: '0 auto', padding: '0 24px 32px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                  {projectMessages.length === 0 ? (
+                    <div className="welcome-screen" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', paddingTop: '80px' }}>
+                      <div className="welcome-logo" style={{ fontSize: '40px', fontWeight: 800, color: 'var(--on-surface)', marginBottom: '12px' }}>
+                        {lang === 'zh' ? '项目助手' : 'Project Assistant'}
+                      </div>
+                      <div className="welcome-text" style={{ fontSize: '14px', color: 'var(--on-surface-variant)', maxWidth: '480px' }}>
+                        {lang === 'zh'
+                          ? '点击左侧文件树中的文件查看内容，或直接输入您的问题。'
+                          : 'Click a file in the tree to read its content, or type your question below.'}
+                      </div>
+                    </div>
+                  ) : (
+                    projectMessages.map(msg => (
+                    <div key={msg.id} className={`message-block ${msg.sender === 'user' ? 'user' : ''}`} style={{ display: 'flex', gap: '12px', flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row' }}>
+                      {/* 头像 */}
+                      <div className="message-avatar-circle" style={{
+                        width: '32px', height: '32px', borderRadius: '8px',
+                        backgroundColor: msg.sender === 'user' ? 'var(--primary)' : 'var(--accent-color)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '12px', fontWeight: 700, color: '#fff',
+                        flexShrink: 0,
+                      }}>
+                        {msg.sender === 'user' ? 'U' : 'F1'}
+                      </div>
+                      {/* 内容 */}
+                      <div className="message-content-wrapper" style={{ maxWidth: '80%', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--on-surface-variant)' }}>
+                            {msg.agentId ? (allAgents.find((a: any) => a.id === msg.agentId)?.name || 'Agent') : (msg.sender === 'user' ? t.userLabel : (lang === 'zh' ? '项目助手' : 'Project Assistant'))}
+                          </span>
+                          <span style={{ fontSize: '10px', color: 'var(--on-surface-variant)', opacity: 0.6 }}>
+                            {new Date(msg.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <div className="message-bubble-body" style={{
+                          backgroundColor: msg.sender === 'user' ? 'var(--primary-container)' : 'var(--surface-lowest)',
+                          border: msg.sender === 'user' ? 'none' : '1px solid var(--border-color)',
+                          borderRadius: '8px', padding: '12px 16px',
+                          fontSize: '13px', lineHeight: 1.6, color: 'var(--on-surface)',
+                          whiteSpace: 'pre-wrap',
+                        }}>
+                          {msg.content}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                  <div style={{ flex: 1, position: 'relative' }}>
-                    {explorerActiveFile && (
-                      <textarea
-                        className="custom-scrollbar"
+                    </div>
+                  )))}
+                  <div ref={projectMessagesEndRef} />
+                </div>
+              </div>
+
+              {/* 底部输入区 */}
+              <div className="chat-input-sticky-bottom" style={{
+                flexShrink: 0,
+                background: 'linear-gradient(180deg, transparent 0%, var(--surface-lowest) 30%)',
+                padding: '16px 24px 24px',
+              }}>
+                <div className="chat-input-width-limiter" style={{ maxWidth: '1000px', margin: '0 auto' }}>
+                  <div className="chat-input-box-container" style={{
+                    backgroundColor: 'var(--surface-low)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    transition: 'border-color 0.15s ease',
+                  }}>
+                    <div className="conversation-context-bar" style={{ padding: '8px 16px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px' }}>
+                      <div className="conversation-context-bar-title" style={{ fontWeight: 600, color: 'var(--on-surface-variant)' }}>{t.contextBarTitle}</div>
+                      {projectMessages.length > 0 ? (
+                        <div className="conversation-context-bar-items" style={{ display: 'flex', gap: '8px' }}>
+                          <span className="conversation-context-chip" style={{ padding: '2px 8px', borderRadius: '10px', backgroundColor: 'var(--surface-container)', color: 'var(--on-surface-variant)', fontSize: '11px' }}>
+                            {t.contextBarTurns}: {Math.ceil(projectMessages.length / 2)}
+                          </span>
+                          <span className="conversation-context-chip" style={{ padding: '2px 8px', borderRadius: '10px', backgroundColor: 'var(--surface-container)', color: 'var(--on-surface-variant)', fontSize: '11px' }}>
+                            {explorerTree.length > 0 ? (lang === 'zh' ? `已加载 ${explorerTree.length} 个文件` : `${explorerTree.length} files loaded`) : (lang === 'zh' ? '未加载文件' : 'No files')}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="conversation-context-bar-empty" style={{ color: 'var(--on-surface-variant)', opacity: 0.6 }}>
+                          {lang === 'zh' ? '新会话' : 'New conversation'}
+                        </div>
+                      )}
+                    </div>
+                    <textarea
+                      className="chat-input-textarea custom-scrollbar"
+                      placeholder={lang === 'zh' ? '询问关于此项目的问题...' : 'Ask about this project...'}
+                      value={projectInput}
+                      onChange={e => setProjectInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleProjectSend();
+                        }
+                      }}
+                      rows={2}
+                      style={{
+                        width: '100%',
+                        padding: '14px 16px',
+                        border: 'none',
+                        borderRadius: '8px 8px 0 0',
+                        backgroundColor: 'transparent',
+                        color: 'var(--on-surface)',
+                        fontSize: '14px',
+                        resize: 'none',
+                        outline: 'none',
+                        fontFamily: 'var(--font-sans)',
+                        minHeight: '54px',
+                        maxHeight: '200px',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <div className="chat-input-toolbar-row" style={{
+                      display: 'flex', justifyContent: 'space-between',
+                      alignItems: 'center', padding: '4px 12px 12px',
+                    }}>
+                      <div className="chat-toolbar-left" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {/* 极简模型切换 */}
+                        <div style={{ position: 'relative' }}>
+                          <div 
+                            style={{ 
+                              backgroundColor: showMiniSelector ? 'var(--surface-container-high)' : 'transparent',
+                              border: '1px solid var(--border-color)',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              cursor: 'pointer',
+                              fontSize: '11px',
+                            }}
+                            onClick={() => setShowMiniSelector(!showMiniSelector)}
+                          >
+                            <Icon name="smart_toy" style={{ fontSize: '13px' }} />
+                            <span>{activeProfile ? activeProfile.name : (lang === 'zh' ? '选择模型' : 'Select Model')}</span>
+                            <span style={{ fontSize: '8px', opacity: 0.7, transform: showMiniSelector ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                          </div>
+
+                          {showMiniSelector && (
+                            <>
+                              <div 
+                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} 
+                                onClick={() => setShowMiniSelector(false)}
+                              />
+                              <div 
+                                className="card-bento"
+                                style={{ 
+                                  position: 'absolute', 
+                                  bottom: 'calc(100% + 8px)', 
+                                  left: 0, 
+                                  minWidth: '240px',
+                                  padding: '8px', 
+                                  zIndex: 999, 
+                                  display: 'flex', 
+                                  flexDirection: 'column', 
+                                  gap: '4px',
+                                  boxShadow: 'var(--shadow-lg)',
+                                  backgroundColor: 'var(--surface-lowest)',
+                                  border: '1px solid var(--border-color)'
+                                }}
+                              >
+                                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--on-surface-variant)', padding: '6px 8px 4px', borderBottom: '1px solid var(--border-color)', marginBottom: '4px' }}>
+                                  {lang === 'zh' ? '切换模型' : 'Switch Model'}
+                                </div>
+                                <div style={{ maxHeight: '200px', overflowY: 'auto' }} className="custom-scrollbar">
+                                  {profiles.map((profile) => {
+                                    const isSel = profile.id === activeProfileId;
+                                    return (
+                                      <div 
+                                        key={profile.id}
+                                        style={{ 
+                                          display: 'flex', 
+                                          alignItems: 'center', 
+                                          justifyContent: 'space-between',
+                                          padding: '8px 10px', 
+                                          borderRadius: '6px', 
+                                          cursor: 'pointer',
+                                          backgroundColor: isSel ? 'var(--surface-container-high)' : 'transparent',
+                                        }}
+                                        onClick={() => {
+                                          setActiveProfileId(profile.id);
+                                          setShowMiniSelector(false);
+                                        }}
+                                      >
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', textAlign: 'left' }}>
+                                          <span style={{ fontSize: '12px', fontWeight: isSel ? 600 : 500, color: isSel ? 'var(--accent-color)' : 'var(--on-surface)' }}>
+                                            {profile.name}
+                                          </span>
+                                          <span style={{ fontSize: '10px', color: 'var(--on-surface-variant)' }}>
+                                            {profile.modelId}
+                                          </span>
+                                        </div>
+                                        {isSel && <Icon name="check" style={{ color: 'var(--accent-color)', fontSize: '14px' }} />}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Agent 选择器 */}
+                        <div style={{ position: 'relative' }}>
+                          <div 
+                            style={{ 
+                              backgroundColor: showChatAgentSelector ? 'var(--surface-container-high)' : 'transparent',
+                              border: selectedChatAgentId ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              cursor: 'pointer',
+                              fontSize: '10px',
+                              fontWeight: selectedChatAgentId ? 600 : 400,
+                              color: selectedChatAgentId ? 'var(--primary)' : 'var(--on-surface-variant)',
+                            }}
+                            onClick={() => setShowChatAgentSelector(!showChatAgentSelector)}
+                          >
+                            <Icon name="agent" style={{ fontSize: '12px' }} />
+                            <span>{selectedChatAgentId ? (allAgents.find((a: any) => a.id === selectedChatAgentId)?.name || 'Agent') : 'Agent'}</span>
+                            {selectedChatAgentId && (
+                              <span style={{ fontSize: '8px', cursor: 'pointer', padding: '1px', borderRadius: '2px' }}
+                                onClick={(e) => { e.stopPropagation(); setSelectedChatAgentId(null); }}
+                              >✕</span>
+                            )}
+                            <span style={{ fontSize: '7px', opacity: 0.7, transform: showChatAgentSelector ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                          </div>
+
+                          {showChatAgentSelector && (
+                            <>
+                              <div 
+                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} 
+                                onClick={() => setShowChatAgentSelector(false)}
+                              />
+                              <div 
+                                className="card-bento"
+                                style={{ 
+                                  position: 'absolute', 
+                                  bottom: 'calc(100% + 8px)', 
+                                  left: 0, 
+                                  minWidth: '200px',
+                                  padding: '6px', 
+                                  zIndex: 999, 
+                                  display: 'flex', 
+                                  flexDirection: 'column', 
+                                  gap: '2px',
+                                  boxShadow: 'var(--shadow-lg)',
+                                  backgroundColor: 'var(--surface-lowest)',
+                                  border: '1px solid var(--border-color)',
+                                }}
+                              >
+                                <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--on-surface-variant)', padding: '5px 8px 3px', borderBottom: '1px solid var(--border-color)', marginBottom: '3px' }}>
+                                  {lang === 'zh' ? '选择 Agent (可选)' : 'Agent (Optional)'}
+                                </div>
+                                <div
+                                  style={{ padding: '5px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', color: 'var(--on-surface-variant)', fontStyle: 'italic' }}
+                                  onClick={() => { setSelectedChatAgentId(null); setShowChatAgentSelector(false); }}
+                                >
+                                  {lang === 'zh' ? '不使用 Agent' : 'No Agent'}
+                                </div>
+                                <div style={{ maxHeight: '180px', overflowY: 'auto' }} className="custom-scrollbar">
+                                  {allAgents.map((agent: any) => (
+                                    <div
+                                      key={agent.id}
+                                      style={{ 
+                                        display: 'flex', alignItems: 'center', gap: '6px',
+                                        padding: '5px 8px', borderRadius: '4px', cursor: 'pointer',
+                                        backgroundColor: selectedChatAgentId === agent.id ? 'var(--surface-container-high)' : 'transparent',
+                                      }}
+                                      onClick={() => { setSelectedChatAgentId(agent.id); setShowChatAgentSelector(false); }}
+                                    >
+                                      <span style={{ fontSize: '12px' }}>{agent.icon}</span>
+                                      <span style={{ fontSize: '11px', fontWeight: selectedChatAgentId === agent.id ? 600 : 400, color: 'var(--on-surface)' }}>{agent.name}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* 审批/危险模式切换 */}
+                        <div 
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '3px',
+                            padding: '2px',
+                            borderRadius: '6px',
+                            backgroundColor: 'var(--surface-container-high)',
+                            border: '1px solid var(--border-color)',
+                            cursor: 'pointer',
+                            fontSize: '10px',
+                            fontWeight: 600,
+                          }}
+                          onClick={() => setApprovalMode(approvalMode === 'approval' ? 'danger' : 'approval')}
+                          title={approvalMode === 'approval' ? (lang === 'zh' ? '切换到危险模式' : 'Switch to Danger Mode') : (lang === 'zh' ? '切换到审批模式' : 'Switch to Approval Mode')}
+                        >
+                          <span style={{
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: approvalMode === 'approval' ? 'var(--accent-color)' : 'transparent',
+                            color: approvalMode === 'approval' ? '#fff' : 'var(--on-surface-variant)',
+                            transition: 'all 0.15s',
+                          }}>
+                            {lang === 'zh' ? '审批' : 'Safe'}
+                          </span>
+                          <span style={{
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: approvalMode === 'danger' ? '#e74c3c' : 'transparent',
+                            color: approvalMode === 'danger' ? '#fff' : 'var(--on-surface-variant)',
+                            transition: 'all 0.15s',
+                          }}>
+                            {lang === 'zh' ? '危险' : 'Danger'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleProjectSend}
                         style={{
-                          width: '100%',
-                          height: '100%',
-                          padding: '16px',
+                          width: '32px', height: '32px', borderRadius: '6px',
                           border: 'none',
-                          resize: 'none',
-                          outline: 'none',
-                          backgroundColor: 'transparent',
-                          color: 'var(--on-surface)',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: '13px',
-                          lineHeight: '1.5'
+                          backgroundColor: isProjectSending ? 'var(--on-surface-variant)' : 'var(--on-surface)',
+                          color: 'var(--surface-lowest)',
+                          cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          transition: 'all 0.15s',
                         }}
-                        value={explorerOpenedFiles.find(f => f.path === explorerActiveFile)?.content || ''}
-                        onChange={(e) => {
-                          const newContent = e.target.value;
-                          setExplorerOpenedFiles(files => files.map(f => f.path === explorerActiveFile ? { ...f, content: newContent, isDirty: true } : f));
-                        }}
-                        onKeyDown={async (e) => {
-                          if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-                            e.preventDefault();
-                            const file = explorerOpenedFiles.find(f => f.path === explorerActiveFile);
-                            if (file) {
-                              await (window as any).forgeone.writeFile(file.path, file.content);
-                              setExplorerOpenedFiles(files => files.map(f => f.path === explorerActiveFile ? { ...f, isDirty: false } : f));
-                            }
+                      >
+                        <Icon name="arrow_upward" style={{ fontSize: '16px' }} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 文件预览侧栏 */}
+              {previewFile && (() => {
+                const ext = previewFile.name.split('.').pop()?.toLowerCase() || '';
+                const binaryExts = ['exe','dll','so','dylib','png','jpg','jpeg','gif','bmp','ico','svg','pdf','zip','gz','tar','7z','rar','mp3','mp4','avi','mov','wav','flac','ogg','woff','woff2','ttf','eot','o','obj','lib','a','class','pyc','pyd','whl'];
+                const isBinary = binaryExts.includes(ext) || /[\x00-\x08\x0E-\x1F]/.test(previewFile.content.slice(0, 4096));
+
+                const langMap: Record<string, string> = {
+                  'js': 'javascript','ts': 'typescript','tsx': 'typescript','jsx': 'javascript',
+                  'rs': 'rust','py': 'python','rb': 'ruby','go': 'go','java': 'java',
+                  'kt': 'kotlin','swift': 'swift','c': 'c','cpp': 'cpp','h': 'c','hpp': 'cpp',
+                  'cs': 'csharp','fs': 'fsharp','sh': 'bash','bash': 'bash','zsh': 'bash',
+                  'yaml': 'yaml','yml': 'yaml','toml': 'ini','json': 'json','xml': 'xml',
+                  'html': 'xml','css': 'css','scss': 'css','less': 'css',
+                  'md': 'markdown','sql': 'sql','graphql': 'graphql',
+                  'dockerfile': 'dockerfile','diff': 'diff','ini': 'ini','cfg': 'ini',
+                  'env': 'ini','gitignore': 'ini','conf': 'ini',
+                };
+                const hljsLang = langMap[ext] || 'plaintext';
+
+                const lines = isBinary ? [] : previewFile.content.split('\n');
+                const lineCount = lines.length;
+
+                return (
+                <div style={{
+                  position: 'absolute', top: 0, right: 0, bottom: 0, width: `${previewWidth}%`,
+                  backgroundColor: 'var(--surface-lowest)',
+                  borderLeft: '1px solid var(--border-color)',
+                  display: 'flex', flexDirection: 'column',
+                  zIndex: 50,
+                  animation: 'slideIn 0.2s ease',
+                  boxShadow: '-4px 0 12px rgba(0,0,0,0.08)',
+                }}>
+                  {/* 拖拽手柄 */}
+                  <div
+                    onMouseDown={handlePreviewMouseDown}
+                    style={{
+                      position: 'absolute', left: 0, top: 0, bottom: 0, width: '4px',
+                      cursor: 'col-resize', zIndex: 51,
+                      backgroundColor: isDraggingPreview ? 'var(--primary)' : 'transparent',
+                      transition: 'background-color 0.1s',
+                    }}
+                    onMouseEnter={e => { if (!isDraggingPreview) e.currentTarget.style.backgroundColor = 'var(--outline)'; }}
+                    onMouseLeave={e => { if (!isDraggingPreview) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                  />
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '10px 16px', borderBottom: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--surface)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Icon name="description" style={{ fontSize: '16px', color: 'var(--on-surface-variant)' }} />
+                      <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)' }}>{previewFile.name}</span>
+                      <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: 'var(--surface-container)', color: 'var(--on-surface-variant)' }}>{ext}</span>
+                      {isBinary && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: '#fee2e2', color: '#dc2626' }}>BINARY</span>}
+                    </div>
+                    <button
+                      onClick={() => setPreviewFile(null)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--on-surface-variant)', padding: '4px', borderRadius: '4px' }}
+                    >
+                      <Icon name="close" style={{ fontSize: '16px' }} />
+                    </button>
+                  </div>
+                  <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+                    {isBinary ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--on-surface-variant)', gap: '12px' }}>
+                        <Icon name="warning" style={{ fontSize: '40px', opacity: 0.4 }} />
+                        <div style={{ fontSize: '14px', fontWeight: 600 }}>{lang === 'zh' ? '二进制文件' : 'Binary File'}</div>
+                        <div style={{ fontSize: '12px', opacity: 0.7 }}>{previewFile.name}</div>
+                        <div style={{ fontSize: '11px', opacity: 0.5 }}>{lang === 'zh' ? '无法预览此文件内容' : 'Cannot preview this file'}</div>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', fontFamily: 'var(--font-mono)', fontSize: '13px', lineHeight: '1.6', minHeight: '100%', padding: '8px 0' }}>
+                        {lines.map((lineContent, i) => {
+                          let lineHtml = '';
+                          try {
+                            const escaped = lineContent
+                              .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            const result = hljs.highlight(escaped, { language: hljsLang, ignoreIllegals: true });
+                            lineHtml = result.value;
+                          } catch {
+                            lineHtml = lineContent
+                              .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                           }
-                        }}
-                      />
+                          return (
+                            <div key={i} style={{ display: 'flex', minHeight: '20.8px' }}>
+                              <div style={{
+                                padding: '0 12px 0 12px', textAlign: 'right', userSelect: 'none',
+                                color: 'var(--on-surface-variant)', opacity: 0.35,
+                                minWidth: `${String(lineCount).length * 10 + 16}px`,
+                                flexShrink: 0, fontSize: '12px', lineHeight: '1.6',
+                                borderRight: '1px solid var(--border-color)',
+                              }}>{i + 1}</div>
+                              <div style={{
+                                padding: '0 16px', flex: 1, overflow: 'hidden',
+                                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                                fontSize: '13px', lineHeight: '1.6',
+                              }}>
+                                <code className={`hljs language-${hljsLang}`}
+                                  style={{ background: 'transparent', padding: 0, fontSize: 'inherit', lineHeight: 'inherit' }}
+                                  dangerouslySetInnerHTML={{ __html: lineHtml || '&nbsp;' }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     )}
                   </div>
-                </>
-              ) : (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--on-surface-variant)' }}>
-                  <Icon name="folder_open" style={{ fontSize: '48px', marginBottom: '16px', opacity: 0.5 }} />
-                  <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--on-surface)', marginBottom: '8px' }}>未选择文件</div>
-                  <div style={{ fontSize: '13px' }}>从左侧的文件树中选择一个代码文件进行预览或编辑</div>
                 </div>
-              )}
-            </div>
-
-            {/* 右栏: 项目 Agent 助手 */}
-            <div className="stitch-right-panel" style={{ width: '320px', borderLeft: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--surface)' }}>
-              <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Icon name="smart_toy" style={{ fontSize: '18px', color: 'var(--on-surface)' }} />
-                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface)' }}>项目 Agent 助手</div>
-              </div>
-              <div className="agent-chat-history custom-scrollbar" style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <div style={{ fontSize: '11px', color: 'var(--on-surface-variant)', fontWeight: 600 }}>ForgeOne 核心智能体</div>
-                  <div style={{ backgroundColor: 'var(--surface-low)', padding: '12px', borderRadius: '8px', fontSize: '13px', color: 'var(--on-surface)', lineHeight: '1.5' }}>
-                    您好！我是项目助手。您可以向我提问关于当前工作区的任何问题，或者我可以帮您分析和重构当前打开的文件。
-                  </div>
-                </div>
-              </div>
-              <div style={{ padding: '16px', borderTop: '1px solid var(--border-color)' }}>
-                <div style={{ position: 'relative' }}>
-                  <textarea 
-                    placeholder="询问关于此项目的问题..." 
-                    className="custom-scrollbar"
-                    style={{ 
-                      width: '100%', 
-                      padding: '12px', 
-                      paddingRight: '40px',
-                      borderRadius: '8px', 
-                      border: '1px solid var(--border-color)', 
-                      backgroundColor: 'var(--surface-lowest)',
-                      color: 'var(--on-surface)',
-                      fontSize: '13px',
-                      resize: 'none',
-                      height: '80px',
-                      outline: 'none'
-                    }}
-                  />
-                  <button 
-                    style={{ 
-                      position: 'absolute', 
-                      right: '8px', 
-                      bottom: '8px', 
-                      width: '28px', 
-                      height: '28px', 
-                      borderRadius: '4px', 
-                      backgroundColor: 'var(--on-surface)', 
-                      color: 'var(--surface-lowest)',
-                      border: 'none',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <Icon name="arrow_upward" style={{ fontSize: '16px' }} />
-                  </button>
-                </div>
-              </div>
+                );
+              })()}
             </div>
             
           </div>

@@ -82,7 +82,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_loops: 8,
+            max_loops: 20,
             token_budget: 32_000,
             max_output_tokens: None,
             model_name: "mock-model".to_string(),
@@ -97,6 +97,7 @@ pub struct RunRequest {
     pub task: String,
     pub conversation_id: Option<String>,
     pub conversation_history: Vec<ConversationTurnRecord>,
+    pub agent_prompt: Option<String>,
     pub config: RuntimeConfig,
 }
 
@@ -108,6 +109,7 @@ pub struct Session {
     pub conversation_history: Vec<ConversationTurnRecord>,
     pub task: Task,
     pub config: RuntimeConfig,
+    pub agent_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +449,19 @@ impl<S: SessionStore> RuntimeCore<S> {
         });
         state.pending_approval = None;
 
+        // 添加批准观察，覆盖同工具之前可能存在的拒绝记录
+        state.observations.push(Observation {
+            tool_name: record.active_tool_call.tool_name.clone(),
+            summary: format!(
+                "tool={} status=approved reason=user approved this tool call via forgeone approve",
+                record.active_tool_call.tool_name
+            ),
+            content: Some(format!(
+                "The tool call {} has been approved by the user in this session. Previous rejections (if any) were for older attempts and should be ignored.",
+                record.active_tool_call.tool_name
+            )),
+        });
+
         let config = RuntimeConfig {
             max_loops: record.max_loops,
             token_budget: record.token_budget,
@@ -471,6 +486,7 @@ impl<S: SessionStore> RuntimeCore<S> {
                 input: record.task_input.clone(),
             },
             config,
+            agent_prompt: None,
         };
 
         let active_mcp_clients = self.init_mcp_clients(&session.config);
@@ -484,6 +500,180 @@ impl<S: SessionStore> RuntimeCore<S> {
         self.execute_tool_call(&mut state, None, &active_mcp_clients);
         self.emit_tool_completed(&mut trace, &state);
 
+        self.complete_state_update(&mut trace, &mut state);
+
+        let final_response =
+            self.run_agent_loop(&session, &mut state, &mut trace, record.loop_index + 1, &active_mcp_clients);
+
+        if state.stop_reason.is_none() {
+            state.stop_reason = Some(StopReason::MaxLoopsReached);
+        }
+        self.transition(&mut state, RuntimeStatus::Completed, None);
+        state.current_phase = RuntimePhase::Finalize;
+
+        let final_response = final_response.unwrap_or_else(|| {
+            format!(
+                "ForgeOne runtime skeleton completed task: {}",
+                session.task.input
+            )
+        });
+
+        trace.push(TraceEvent::new(
+            state.session_id.clone(),
+            state.agent_id.clone(),
+            state.parent_agent_id.clone(),
+            state.loop_index,
+            TraceEventKind::SessionStopped,
+            format!(
+                "task_id={} phase={} status={} stop_reason={}",
+                state.task_id,
+                state.current_phase,
+                state.status,
+                state
+                    .stop_reason
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+        ));
+
+        self.delete_approval_session(session_id)?;
+
+        let result = RunResult {
+            state,
+            final_response,
+            trace: trace.into_events(),
+        };
+        let trace_record = self.build_session_trace_record(&result, &session);
+        self.save_session_trace(&trace_record)
+            .map_err(|error| format!("failed to save session trace: {error}"))?;
+
+        Ok(result)
+    }
+
+    pub fn reject_session(&self, session_id: &str) -> Result<RunResult, String> {
+        let record = self.load_approval_session(session_id)?;
+        let mut trace = InMemoryTraceStore::default();
+
+        let mut state = RuntimeState {
+            session_id: record.session_id.clone(),
+            task_id: record.task_id.clone(),
+            agent_id: record.agent_id.clone(),
+            parent_agent_id: None,
+            loop_index: record.loop_index,
+            status: RuntimeStatus::Running,
+            current_phase: RuntimePhase::ToolDecision,
+            active_step: Some(LoopStep::ToolDecision),
+            active_context_snapshot: None,
+            active_model_request: None,
+            last_model_response: None,
+            active_tool_call: Some(ToolCallRequest {
+                call_id: record.active_tool_call.call_id.clone(),
+                session_id: record.session_id.clone(),
+                agent_id: record.agent_id.clone(),
+                loop_index: record.loop_index,
+                tool_name: record.active_tool_call.tool_name.clone(),
+                arguments: record.active_tool_call.arguments.clone(),
+                requested_by: record.active_tool_call.requested_by.clone(),
+            }),
+            last_tool_result: None,
+            last_executed_tool_signature: record.last_executed_tool_signature.clone(),
+            observations: record
+                .observations
+                .iter()
+                .map(|observation| Observation {
+                    tool_name: observation.tool_name.clone(),
+                    summary: observation.summary.clone(),
+                    content: None,
+                })
+                .collect(),
+            policy_decisions: record
+                .policy_decisions
+                .iter()
+                .map(|decision| PolicyRecord {
+                    scope: decision.scope.clone(),
+                    decision: decision.decision.clone(),
+                    detail: decision.detail.clone(),
+                })
+                .collect(),
+            pending_approval: Some(PendingApproval {
+                tool_name: record.pending_approval.tool_name.clone(),
+                reason: record.pending_approval.reason.clone(),
+                argument_summary: record.pending_approval.argument_summary.clone(),
+            }),
+            budget_usage: BudgetUsage {
+                tokens_estimate: record.tokens_estimate,
+                tool_call_count: record.tool_call_count,
+            },
+            stop_reason: None,
+            compression_summary: None,
+        };
+
+        trace.push(TraceEvent::new(
+            state.session_id.clone(),
+            state.agent_id.clone(),
+            state.parent_agent_id.clone(),
+            state.loop_index,
+            TraceEventKind::TaskReceived,
+            format!("task_id={} approval_rejected=true", state.task_id),
+        ));
+
+        // 记录用户拒绝的策略决策
+        state.policy_decisions.push(PolicyRecord {
+            scope: "tool_call".to_string(),
+            decision: "rejected_by_user".to_string(),
+            detail: format!(
+                "tool={} rejected by user via forgeone reject",
+                record.active_tool_call.tool_name
+            ),
+        });
+        state.pending_approval = None;
+
+        // 添加观察：工具调用被用户拒绝（本次 attempt，后续新 attempt 会被覆盖）
+        state.observations.push(Observation {
+            tool_name: record.active_tool_call.tool_name.clone(),
+            summary: format!(
+                "tool={} status=rejected reason=user declined the approval request (attempt {})",
+                record.active_tool_call.tool_name,
+                record.loop_index,
+            ),
+            content: Some(format!(
+                "The tool call {} (attempt {}) was rejected by the user. If the user sends a new message asking to retry, a new attempt will be made independently.",
+                record.active_tool_call.tool_name,
+                record.loop_index,
+            )),
+        });
+
+        let config = RuntimeConfig {
+            max_loops: record.max_loops,
+            token_budget: record.token_budget,
+            max_output_tokens: record.max_output_tokens,
+            model_name: record.model_name.clone(),
+            policy: PolicyConfig {
+                allowed_tools: record.allowed_tools.clone(),
+                read_roots: record.read_roots.clone(),
+                max_tool_calls: record.max_tool_calls,
+                approval_read_roots: record.approval_read_roots.clone(),
+            },
+            mcp_servers: record.mcp_servers.clone(),
+        };
+
+        let session = Session {
+            session_id: record.session_id.clone(),
+            conversation_id: record.conversation_id.clone(),
+            turn_index: record.turn_index,
+            conversation_history: record.conversation_history.clone(),
+            task: Task {
+                task_id: record.task_id.clone(),
+                input: record.task_input.clone(),
+            },
+            config,
+            agent_prompt: None,
+        };
+
+        let active_mcp_clients = self.init_mcp_clients(&session.config);
+
+        // 不执行被拒绝的工具调用，直接继续 agent loop
         self.complete_state_update(&mut trace, &mut state);
 
         let final_response =
@@ -892,7 +1082,14 @@ impl<S: SessionStore> RuntimeCore<S> {
             task_input: session.task.input.clone(),
             session_history: self.build_session_history(state, session),
             tool_observations: self.to_observation_summaries(&state.observations),
-            system_prompt: SYSTEM_PROMPT.to_string(),
+            system_prompt: {
+                let base = SYSTEM_PROMPT.to_string();
+                if let Some(ref ap) = session.agent_prompt {
+                    format!("{}\n\n## Agent Role\n\n{}", base, ap)
+                } else {
+                    base
+                }
+            },
             runtime_contract: self.build_runtime_contract(state),
             policy_injections: self.build_policy_injections(state),
             working_memory: self.build_working_memory(state, session),
@@ -1061,6 +1258,7 @@ impl<S: SessionStore> RuntimeCore<S> {
             "Do not rely on hidden prompt state.".to_string(),
             "Prefer goal anchor and working set over archive summary when reasoning.".to_string(),
             "If context grows, compress old history and stale observations before expanding active context.".to_string(),
+            "workspace_read_roots: paths outside the workspace read roots are not immediately accessible, but the runtime will prompt the user for approval — simply call the tool with the desired path.".to_string(),
         ];
 
         if let Some(snapshot) = &state.active_context_snapshot {
@@ -1086,6 +1284,18 @@ impl<S: SessionStore> RuntimeCore<S> {
     }
 
     fn build_runtime_contract(&self, state: &RuntimeState) -> Vec<String> {
+        // 收集系统信息帮助模型构建正确的路径
+        let os_info = if cfg!(windows) {
+            "os=windows path_separator=\\ env_home=%USERPROFILE% desktop=%USERPROFILE%\\Desktop"
+        } else if cfg!(target_os = "macos") {
+            "os=macos path_separator=/ env_home=$HOME desktop=$HOME/Desktop"
+        } else {
+            "os=linux path_separator=/ env_home=$HOME desktop=$HOME/Desktop"
+        };
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
         let mut contract = vec![
             "## Runtime Contract".to_string(),
             "runtime_kind: open agent runtime with controllable tool execution".to_string(),
@@ -1093,6 +1303,8 @@ impl<S: SessionStore> RuntimeCore<S> {
             "visible_prompt_layers: goal_anchor, working_set, evidence_buffer, archive_summary".to_string(),
             "persistent_task_memory: false across restarts unless the harness explicitly reloads prior state".to_string(),
             "context_management: older history and stale observations may be compressed before active context expands".to_string(),
+            format!("system_info: {}", os_info),
+            format!("cwd: {}", cwd),
         ];
 
         if let Some(snapshot) = &state.active_context_snapshot {
@@ -1821,6 +2033,7 @@ impl Session {
             conversation_history: request.conversation_history,
             task,
             config: request.config,
+            agent_prompt: request.agent_prompt,
         }
     }
 }
@@ -2034,10 +2247,9 @@ mod tests {
     }
 
     #[test]
-    fn denied_tool_call_does_not_consume_execution_budget() {
+    fn tool_call_outside_workspace_triggers_waiting_approval() {
         let core = RuntimeCore::default();
-        let mut config = RuntimeConfig::default();
-        config.policy.max_tool_calls = 1;
+        let config = RuntimeConfig::default();
 
         let mut state = build_test_state(
             "search_files",
@@ -2046,9 +2258,32 @@ mod tests {
         let active_mcp_clients = Vec::new();
         let outcome = core.execute_tool_call(&mut state, Some(&config.policy), &active_mcp_clients);
 
+        // 工作区之外的路径不再直接拒绝，而是请求用户审批
+        assert!(matches!(outcome, super::ToolExecutionOutcome::WaitingApproval));
+        assert!(state.pending_approval.is_some());
+        assert_eq!(state.policy_decisions.last().unwrap().decision, "require_approval");
+        // last_tool_result 在等待审批时为 None（尚未执行）
+        assert!(state.last_tool_result.is_none());
+        // budget 不应消耗
+        assert_eq!(state.budget_usage.tool_call_count, 0);
+    }
+
+    #[test]
+    fn budget_exceeded_tool_call_is_denied() {
+        let core = RuntimeCore::default();
+        let mut config = RuntimeConfig::default();
+        config.policy.max_tool_calls = 0; // budget exhausted
+
+        let mut state = build_test_state(
+            "read_file",
+            [("path", "Cargo.toml")],
+        );
+        let active_mcp_clients = Vec::new();
+        let outcome = core.execute_tool_call(&mut state, Some(&config.policy), &active_mcp_clients);
+
+        // 预算超限仍应直接拒绝
         assert!(matches!(outcome, super::ToolExecutionOutcome::Denied));
         assert_eq!(state.budget_usage.tool_call_count, 0);
-        assert_eq!(state.observations.len(), 1);
         assert!(state.last_tool_result.as_ref().is_some_and(
             |result| result.status == forgeone_tools::ToolCallStatus::PermissionDenied
         ));

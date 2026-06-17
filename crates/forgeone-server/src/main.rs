@@ -41,6 +41,7 @@ struct RunParams {
     approval_read_roots: Option<Vec<String>>,
     api_key: Option<String>,
     base_url: Option<String>,
+    agent_prompt: Option<String>,
     mcp_servers: Option<Vec<forgeone_tools::McpServerConfig>>,
 }
 
@@ -201,6 +202,7 @@ fn handle_request(
                 task: params.task,
                 conversation_id: params.conversation_id,
                 conversation_history: params.conversation_history.unwrap_or_default(),
+                agent_prompt: params.agent_prompt,
                 config,
             };
 
@@ -212,6 +214,13 @@ fn handle_request(
                 .map_err(|e| format!("Invalid params for approve: {e}"))?;
             
             let res = runtime.approve_session(&params.session_id)?;
+            Ok(serialize_run_result(res))
+        }
+        "reject" => {
+            let params: SessionIdParams = serde_json::from_value(params.unwrap_or(serde_json::Value::Null))
+                .map_err(|e| format!("Invalid params for reject: {e}"))?;
+            
+            let res = runtime.reject_session(&params.session_id)?;
             Ok(serialize_run_result(res))
         }
         "resume" => {

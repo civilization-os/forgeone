@@ -53,6 +53,7 @@ impl EvalSuite for DefaultEvalSuite {
             task: task.input.clone(),
             conversation_id: None,
             conversation_history: vec![],
+            agent_prompt: None,
             config,
         };
         runtime.run(request)
