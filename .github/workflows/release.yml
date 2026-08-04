@@ -1,0 +1,45 @@
+name: Release
+
+# Tag 触发：git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: apps/forgeone-desktop/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+        working-directory: apps/forgeone-desktop
+
+      # beforeBuildCommand 会先跑 npm run build（前端），随后编译 Rust 并生成 NSIS 安装包
+      # tauri 会自动下载 NSIS 工具链（runner 无需预装）
+      - name: Build NSIS installer
+        run: npm run tauri:build
+        working-directory: apps/forgeone-desktop
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release & upload installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/nsis/*.exe
+          generate_release_notes: true
