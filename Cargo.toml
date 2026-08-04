@@ -1,15 +1,15 @@
 [workspace]
 members = [
     "crates/forgeone-context",
+    "crates/forgeone-harness",
     "crates/forgeone-model",
-    "crates/forgeone-model-openai",
-    "crates/forgeone-model-ollama",
     "crates/forgeone-policy",
     "crates/forgeone-runtime",
     "crates/forgeone-session",
     "crates/forgeone-tools",
     "crates/forgeone-trace",
-    "crates/forgeone-server", "crates/forgeone-eval",
+    "crates/forgeone-server",
+    "apps/forgeone-desktop/src-tauri",
 ]
 resolver = "2"
 

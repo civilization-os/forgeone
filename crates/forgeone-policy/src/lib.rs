@@ -118,10 +118,13 @@ impl PolicyEngine {
                 .map(|prefix| normalize_path_for_policy(prefix))
                 .any(|prefix| path_matches_policy_prefix(&path, &prefix));
             if !allowed {
-                return PolicyDecision::Denied(PolicyViolation::new(
-                    "path_not_allowed",
-                    format!("path={raw_path} is outside allowed read roots"),
-                ));
+                return PolicyDecision::RequireApproval(ApprovalRequest {
+                    reason: format!(
+                        "path={raw_path} is outside workspace read roots; user approval required"
+                    ),
+                    tool_name: request.tool_name.clone(),
+                    argument_summary: format!("path={raw_path}"),
+                });
             }
 
             let requires_approval = self
@@ -169,7 +172,7 @@ mod tests {
     use super::{PolicyConfig, PolicyDecision, PolicyEngine};
 
     #[test]
-    fn policy_denies_disallowed_path() {
+    fn policy_requests_approval_for_outside_workspace_path() {
         let engine = PolicyEngine::new(PolicyConfig::default());
         let mut arguments = HashMap::new();
         arguments.insert("path".to_string(), "/etc/passwd".to_string());
@@ -187,7 +190,7 @@ mod tests {
             0,
         );
 
-        assert!(matches!(decision, PolicyDecision::Denied(_)));
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
     }
 
     #[test]
@@ -213,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_applies_read_roots_to_search_files() {
+    fn policy_requests_approval_for_search_files_outside_workspace() {
         let engine = PolicyEngine::new(PolicyConfig::default());
         let mut arguments = HashMap::new();
         arguments.insert("pattern".to_string(), "Cargo.toml".to_string());
@@ -232,7 +235,7 @@ mod tests {
             0,
         );
 
-        assert!(matches!(decision, PolicyDecision::Denied(_)));
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
     }
 
     #[test]
@@ -256,5 +259,241 @@ mod tests {
         );
 
         assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    // ── 读取工作区之外的文件 ──
+
+    #[test]
+    fn policy_requests_approval_for_absolute_path_outside_workspace() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "/tmp/outside_file.txt".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-5".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+        if let PolicyDecision::RequireApproval(approval) = decision {
+            assert!(approval.reason.contains("outside workspace"));
+            assert_eq!(approval.tool_name, "read_file");
+        }
+    }
+
+    #[test]
+    fn policy_requests_approval_for_parent_directory_traversal() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "../outside_secret.json".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-6".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_requests_approval_for_nested_parent_traversal() {
+        // NOTE: 此路径 `../outside_file.txt` 不匹配任何 read_root,
+        //       因此触发审批请求而非直接拒绝。
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "../outside_file.txt".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-7".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_requests_approval_for_deep_nested_parent_traversal() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "a/b/c/../../../../etc/passwd".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-8".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        // `a/b/c/../../../../etc/passwd` 不匹配任何 read_root,
+        // 现在触发审批请求而非直接拒绝
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_requests_approval_for_system_path_on_windows() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "C:\\Windows\\System32\\config\\SAM".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-9".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_allows_read_within_default_read_root() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        // `./` 前缀被 normalize 剥离后变为 `docs/architecture.md`，匹配 read_root `docs/`
+        arguments.insert("path".to_string(), "./docs/architecture.md".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-10".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::Allowed));
+    }
+
+    #[test]
+    fn policy_requests_approval_for_read_without_dot_slash_prefix() {
+        // `Cargo.toml`（无 `./` 前缀）不匹配 read_root `.` —
+        // 因为 `path_matches_policy_prefix` 仅检查 `path == "."` 或 `path.starts_with("./")`
+        // 现在触发审批请求而非直接拒绝
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "Cargo.toml".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-11".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_allows_read_nested_path_in_read_root() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("path".to_string(), "crates/forgeone-policy/src/lib.rs".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-10".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::Allowed));
+    }
+
+    #[test]
+    fn policy_requests_approval_for_search_content_outside_workspace() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let mut arguments = HashMap::new();
+        arguments.insert("pattern".to_string(), "secret".to_string());
+        arguments.insert("path".to_string(), "/home/user/credentials".to_string());
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-11".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "search_content".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn policy_denies_read_file_when_no_path_arg_specified() {
+        let engine = PolicyEngine::new(PolicyConfig::default());
+        let arguments = HashMap::new();
+
+        let decision = engine.check_tool_call(
+            &ToolCallRequest {
+                call_id: "tool-call-12".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                loop_index: 1,
+                tool_name: "read_file".to_string(),
+                arguments,
+                requested_by: "runtime".to_string(),
+            },
+            0,
+        );
+
+        // When path is missing, tool_uses_read_roots triggers but path defaults to ".",
+        // which IS within the default read_root "." → Allowed.
+        assert!(matches!(decision, PolicyDecision::Allowed));
     }
 }

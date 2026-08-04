@@ -21,8 +21,12 @@ ForgeOne 采用分层架构，将交互入口、运行时内核、上下文系�
 
 ```mermaid
 flowchart TB
-    CLI[CLI] --> CORE[Runtime Core]
-    TUI[TUI] --> CORE
+    CHANNELS[Channels: CLI/TUI/WebChat] --> ROUTER[Channel Router]
+    ROUTER --> HARNESS[Harness Layer: Agent Manager]
+    
+    HARNESS --> MODELMGR[Model Manager]
+    HARNESS --> CORE[Runtime Core - Instance A]
+    HARNESS -. spawn .-> CORE_B[Runtime Core - Instance B...]
 
     CORE --> LOOP[Agent Loop]
     CORE --> STATE[Runtime State]
@@ -30,7 +34,7 @@ flowchart TB
     CORE --> POLICY[Policy Engine]
 
     LOOP --> CONTEXT[Context Engine]
-    LOOP --> MODEL[Model Adapter]
+    LOOP -. request inference .-> MODELMGR
     LOOP --> TOOLS[Tool Runtime]
 
     TOOLS --> MCP[MCP Adapter]
@@ -66,7 +70,23 @@ CLI 是面向终端用户和自动化脚本的主入口，负责：
 - `trace list/show/prune`
 - `session list/prune`
 
-CLI 不负责实现 Agent 智能，只负责将用户意图转交给 Harness 和 Runtime。
+CLI 不负责实现 Agent 智能，只负责将用户意图转交给 Harness。
+
+### Harness & Agent Manager
+
+Harness 作为 ForgeOne 的调度中心，承担着 **Multi-Agent** 的管理责任。它负责：
+- 接收经过 Channel Router 分发的输入
+- 创建、恢复或休眠多个 Runtime Core (Agent 实例)
+- 保证多 Agent 环境下的 Session 和 Context 隔离
+
+### Channel Router
+
+Channel Router 负责剥离输入环境的复杂性。外部无论是 CLI、Terminal UI、WebChat 甚至 Discord，都抽象为 Channel。Router 将这些消息根据 Binding 规则路由到对应的 Agent Session，实现多端接入、多 Agent 隔离的消息投递能力。
+
+### Model Manager
+
+集中持有大模型端点（如 OpenAI, Anthropic, 本地 Ollama 等）的配置、API Key 及并发限制策略。
+Agent Loop 不再私自持有 Key 或直接建立 HTTP 连接，而是通过 Model Manager 申请推理资源。这使得多 Agent 并发时的 Token 额度、模型切换和重试能够得到统一的收口管理。
 
 ### TUI
 
@@ -256,9 +276,14 @@ sequenceDiagram
 - 所有本地恢复点都必须通过 Runtime State 与 `.forgeone` Session Store 统一管理
 ## 后端演进方向
 
-ForgeOne 后端下一阶段应优先收敛 Runtime 边界，而不是继续把更多控制逻辑叠加进 `forgeone-runtime`。
+ForgeOne 后端下一阶段应优先向 **Multi-Agent Harness** 架构演进，并收敛 Runtime 边界，而不是继续把更多控制逻辑叠加进 `forgeone-runtime`。
 
 目标边界如下：
+
+### Harness / Channel / Model Manager
+
+- 引入 `Agent Manager` 和 `Channel Router`，提供真正的多终端和多智能体路由能力，剥离对单一 UI 的耦合。
+- 引入独立的 `Model Manager`，接管所有推理请求及限流。
 
 ### Session Store
 

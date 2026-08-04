@@ -48,7 +48,10 @@ Runtime 是 ForgeOne 的核心执行内核，负责状态管理、模型请求�
 
 ### Harness
 
-Harness 是 Runtime 的承载外壳，负责连接 CLI、TUI、批处理任务、测试环境和远程执行器。Harness 不定义智能行为，只负责将输入、上下文、能力边界和观测面接到 Runtime。
+Harness 是 Runtime 的承载外壳，也是 ForgeOne 作为 **Multi-Agent** 调度中心的核心。它负责：
+- 管理多个 Agent 实例的生命周期（Agent Manager）
+- 提供中心化的模型连接和配额管理（Model Management）
+- 将不同来源的输入（CLI, WebChat, Discord 插件等）抽象为 Channel，并由 Router 转发给对应的 Agent 实例。Harness 不定义智能行为，只负责边界接入和策略执行。
 
 ### Context
 
@@ -62,15 +65,25 @@ Tool 是 Runtime 统一调度的执行单元，包含本地命令、文件操作
 
 Trace 是对 Agent Loop 中每一次输入、上下文构建、模型请求、工具执行、状态更新和停止决策的结构化记录。
 
+### Model Management
+
+统一收口模型配置与调用，Agent 并不持有真实的密钥或直接连接外部 API。Agent 声明所需的推理规格，由 Harness 层的 Model Manager 负责分配实际的大模型 Endpoint（如 OpenAI, Anthropic, Ollama 等）并记录消费 Token，实现预算的物理隔离。
+
+### Channel Routing
+
+将外部环境（如 WebChat, Discord, Terminal）与内部的 Agent 解耦。外部平台作为 Channel 接入 ForgeOne，由通道管理器 (Channel Router) 决定将消息绑定 (Bind) 给哪一个具体的 Agent 实例，从而实现多终端与多智能体的灵活通信。
+
 ## Architecture
 
 ```mermaid
 flowchart TB
-    U[User or Automation] --> CLI[CLI]
-    U --> TUI[TUI]
-    CLI --> HARNESS[Harness Layer]
-    TUI --> HARNESS
-    HARNESS --> RUNTIME[Runtime Core]
+    U[User or Automation] --> CHANNELS[Channels: CLI/TUI/WebChat]
+    CHANNELS --> ROUTER[Channel Router]
+    ROUTER --> HARNESS[Harness Layer: Agent Manager]
+    
+    HARNESS --> MODELMGR[Model Manager]
+    HARNESS --> RUNTIME[Runtime Core - Instance A]
+    HARNESS -. spawn .-> RUNTIME_B[Runtime Core - Instance B]
 
     RUNTIME --> LOOP[Agent Loop]
     RUNTIME --> POLICY[Policy Engine]
@@ -78,7 +91,7 @@ flowchart TB
     RUNTIME --> STATE[Runtime State Store]
 
     LOOP --> CONTEXT[Context Engine]
-    LOOP --> MODEL[Model Adapter]
+    LOOP -. request inference .-> MODELMGR
     LOOP --> TOOLS[Tool Runtime]
 
     TOOLS --> MCP[MCP Adapter]
@@ -191,6 +204,8 @@ CLI 的设计原则：
 
 ForgeOne 后端下一阶段的重点不是继续堆叠入口能力，而是把 Runtime Core 进一步解耦为稳定的后端运行时边界：
 
+- **演进为 Multi-Agent Harness**：引入 `Agent Manager` 管理多实例生命周期，引入 `Channel Router` 承接外部接口，提供统一的多终端/多应用路由能力。
+- **中心化模型管理 (Model Management)**：引入独立的 `Model Manager` 管理多模型的端点、配置和速率，Agent Loop 不再直连提供商。
 - 将 `Session Store`、`Runtime Runner`、`Trace Projection` 从单体 `Runtime Core` 中拆出
 - 将 `Context Snapshot` 演进为可版本化、可重建的 `Context Epoch`
 - 将 `Tool Registry` 演进为带作用域、注册身份和陈旧调用拒绝语义的 `Tool Runtime`

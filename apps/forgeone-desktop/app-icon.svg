@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- ForgeOne app icon: purple lightning bolt on transparent background -->
+  <path fill="#863bff" d="M 293 36
+     C 290 29 282 28 278 34
+     L 128 258
+     C 124 264 128 272 136 272
+     L 228 272
+     L 180 460
+     C 178 468 186 475 193 470
+     L 393 260
+     C 398 254 394 244 386 244
+     L 296 244
+     L 309 50
+     C 309 43 302 37 293 36 Z"/>
+</svg>

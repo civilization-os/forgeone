@@ -2,7 +2,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use super::{SkillTool, 
+    use crate::{SkillTool, 
         DiffTool, DirectoryTreeTool, EditFileTool, GitTool, GlobTool, SearchContentTool, ShellTool,
         ToolCallRequest, ToolCallStatus, ToolExecutor, ToolRegistry, next_tool_call_id,
     };
@@ -49,7 +49,7 @@ assert_eq!(result.status, ToolCallStatus::Success);
     fn decode_windows_console_output_handles_utf16le() {
         let bytes = "C:\u{76d8}\u{7b26}\r\n".encode_utf16()
             .flat_map(|unit| unit.to_le_bytes()).collect::<Vec<_>>();
-        assert_eq!(super::decode_windows_console_output(&bytes), "C:\u{76d8}\u{7b26}\r\n");
+        assert_eq!(crate::decode_windows_console_output(&bytes), "C:\u{76d8}\u{7b26}\r\n");
     }
 
     #[test]
