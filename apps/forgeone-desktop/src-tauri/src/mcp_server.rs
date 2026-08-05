@@ -1,10 +1,11 @@
 use axum::{
     extract::{Query, State},
+    http::StatusCode,
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use forgeone_runtime::{AgentEvent, AgentLoop, AgentRunRequest, RuntimeCore};
@@ -52,6 +53,9 @@ pub async fn start_mcp_server(runtime: Arc<RuntimeCore>) {
         agent_loop: Arc::new(AgentLoop::default()),
     });
 
+    // MCP 自动连接 + 保持连接：启动立即连接，之后每 30s 自动拉起 failed 并重建断开的连接
+    state.agent_loop.start_mcp_keepalive(std::time::Duration::from_secs(30));
+
     let app = Router::new()
         .route("/sse", get(sse_handler))
         .route("/api/health", get(health_handler))
@@ -62,6 +66,16 @@ pub async fn start_mcp_server(runtime: Arc<RuntimeCore>) {
         .route("/api/project/git_status", get(git_status_handler))
         // 工具审批：批准/拒绝待审批的工具调用
         .route("/api/agent/approve", post(approve_handler))
+        // MCP Server 管理：列表 / 添加 / 删除（.forgeone/mcp/*.json 配置）
+        .route("/api/mcp/servers", get(mcp_servers_handler))
+        .route("/api/mcp/servers", post(mcp_add_handler))
+        .route("/api/mcp/servers", delete(mcp_remove_handler))
+        // 详情（配置 + 工具列表）/ 重连（failed → 重新注册）
+        .route("/api/mcp/servers/detail", get(mcp_detail_handler))
+        .route("/api/mcp/servers/reconnect", post(mcp_reconnect_handler))
+        // Skill：清单 / 详情（.forgeone/skills/*/SKILL.md）
+        .route("/api/skills", get(skills_list_handler))
+        .route("/api/skills/detail", get(skills_detail_handler))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -270,4 +284,221 @@ async fn sse_handler() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
 
     Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ── MCP Server 管理（.forgeone/mcp/*.json）────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct McpServersQuery {
+    pub workspace: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpAddRequest {
+    pub workspace: String,
+    /// "global"（用户级，对所有项目生效）| "project"（当前项目）
+    pub scope: Option<String>,
+    pub name: String,
+    /// "stdio"（默认，用 entrypoint 启动子进程）| "sse"（用 endpoint 连接 HTTP+SSE 站点）
+    pub transport: Option<String>,
+    pub entrypoint: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpRemoveRequest {
+    pub workspace: String,
+    /// "global" | "project"
+    pub scope: Option<String>,
+    pub name: String,
+}
+
+type ApiResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+
+fn api_err(code: StatusCode, message: String) -> (StatusCode, Json<serde_json::Value>) {
+    (code, Json(serde_json::json!({ "error": message })))
+}
+
+async fn mcp_servers_handler(
+    State(state): State<Arc<McpServerState>>,
+    Query(params): Query<McpServersQuery>,
+) -> ApiResult {
+    // 列表会触发幂等注册（拉起 MCP 子进程/连接，可能阻塞数十秒），必须移出 tokio worker
+    let agent = state.agent_loop.clone();
+    let workspace = params.workspace;
+    let servers = tokio::task::spawn_blocking(move || agent.list_mcp_servers(&workspace))
+        .await
+        .map_err(|e| {
+            api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("MCP 列表任务失败: {e}"),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "servers": servers })))
+}
+
+async fn mcp_add_handler(
+    State(state): State<Arc<McpServerState>>,
+    Json(req): Json<McpAddRequest>,
+) -> ApiResult {
+    let scope = req.scope.unwrap_or_else(|| "project".to_string());
+    let transport = req.transport.unwrap_or_else(|| "stdio".to_string());
+    let agent = state.agent_loop.clone();
+    let workspace = req.workspace;
+    let name = req.name;
+    let entrypoint = req.entrypoint.unwrap_or_default();
+    let endpoint = req.endpoint.unwrap_or_default();
+    // 添加会拉起子进程/建立 SSE 连接并握手（可能阻塞数十秒），移出 tokio worker
+    let result = tokio::task::spawn_blocking(move || {
+        agent.add_mcp_server(&workspace, &scope, &name, &transport, &entrypoint, &endpoint)
+    })
+    .await
+    .map_err(|e| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MCP 添加任务失败: {e}"),
+        )
+    })?;
+    match result {
+        Ok(server) => Ok(Json(serde_json::json!({ "server": server }))),
+        Err(e) => Err(api_err(StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+async fn mcp_remove_handler(
+    State(state): State<Arc<McpServerState>>,
+    Json(req): Json<McpRemoveRequest>,
+) -> ApiResult {
+    let scope = req.scope.unwrap_or_else(|| "project".to_string());
+    let agent = state.agent_loop.clone();
+    let workspace = req.workspace;
+    let name = req.name;
+    let result = tokio::task::spawn_blocking(move || {
+        agent.remove_mcp_server(&workspace, &scope, &name)
+    })
+    .await
+    .map_err(|e| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MCP 删除任务失败: {e}"),
+        )
+    })?;
+    match result {
+        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => Err(api_err(StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpReconnectRequest {
+    pub workspace: String,
+    /// "global" | "project"
+    pub scope: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpDetailQuery {
+    pub workspace: String,
+    /// "global" | "project"
+    pub scope: String,
+    pub name: String,
+}
+
+async fn mcp_reconnect_handler(
+    State(state): State<Arc<McpServerState>>,
+    Json(req): Json<McpReconnectRequest>,
+) -> ApiResult {
+    let scope = req.scope.unwrap_or_else(|| "project".to_string());
+    let agent = state.agent_loop.clone();
+    let workspace = req.workspace;
+    let name = req.name;
+    // 重连会拉起 MCP 连接并握手（可能阻塞数十秒），移出 tokio worker
+    let result = tokio::task::spawn_blocking(move || {
+        agent.reconnect_mcp_server(&workspace, &scope, &name)
+    })
+    .await
+    .map_err(|e| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MCP 重连任务失败: {e}"),
+        )
+    })?;
+    match result {
+        Ok(server) => Ok(Json(serde_json::json!({ "server": server }))),
+        Err(e) => Err(api_err(StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+async fn mcp_detail_handler(
+    State(state): State<Arc<McpServerState>>,
+    Query(params): Query<McpDetailQuery>,
+) -> ApiResult {
+    let agent = state.agent_loop.clone();
+    let workspace = params.workspace;
+    let scope = params.scope;
+    let name = params.name;
+    let result = tokio::task::spawn_blocking(move || {
+        agent.get_mcp_server_detail(&workspace, &scope, &name)
+    })
+    .await
+    .map_err(|e| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MCP 详情任务失败: {e}"),
+        )
+    })?;
+    match result {
+        Ok(server) => Ok(Json(serde_json::json!({ "server": server }))),
+        Err(e) => Err(api_err(StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+// ── /api/skills ───────────────────────────────────────────────────
+// Skill：`.forgeone/skills/*/SKILL.md` 的清单与详情。
+// 清单 = frontmatter 元数据（name/description/version）；详情 = 元数据 + 指令正文。
+// 发现范围：项目级 `{workspace}/.forgeone/skills` 优先，全局 `{user_home}/.forgeone/skills` 兜底。
+
+#[derive(Debug, Deserialize)]
+pub struct SkillsListParams {
+    pub workspace: String,
+}
+
+async fn skills_list_handler(
+    Query(params): Query<SkillsListParams>,
+) -> Json<serde_json::Value> {
+    match forgeone_tools::discover_skills(&params.workspace) {
+        Ok(skills) => Json(serde_json::json!({
+            "ok": true,
+            "skills": skills.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "version": s.version,
+            })).collect::<Vec<_>>(),
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillsDetailParams {
+    pub workspace: String,
+    pub name: String,
+}
+
+async fn skills_detail_handler(
+    Query(params): Query<SkillsDetailParams>,
+) -> Json<serde_json::Value> {
+    match forgeone_tools::load_skill(&params.workspace, &params.name) {
+        Ok(skill) => Json(serde_json::json!({
+            "ok": true,
+            "skill": {
+                "name": skill.name,
+                "description": skill.description,
+                "version": skill.version,
+                "body": skill.body,
+            }
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }

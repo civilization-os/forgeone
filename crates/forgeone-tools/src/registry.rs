@@ -76,6 +76,33 @@ impl ToolRegistry {
         list
     }
 
+    /// provider 是否已注册（用于外部工具注册的幂等判断）
+    pub fn has_provider(&self, provider_id: &str) -> bool {
+        self.providers.contains_key(provider_id)
+    }
+
+    /// 注销 provider 及其全部工具执行器。
+    /// 移除后执行器被 drop：若为 MCP 工具，`ActiveMcpClient` 引用计数归零，
+    /// 其 `Drop` 会同步 kill 对应子进程。
+    pub fn remove_provider(&mut self, provider_id: &str) -> Result<(), String> {
+        if !self.providers.contains_key(provider_id) {
+            return Err(format!("provider={} is not registered", provider_id));
+        }
+
+        let tool_names: Vec<String> = self
+            .tool_providers
+            .iter()
+            .filter(|(_, pid)| pid.as_str() == provider_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in tool_names {
+            self.executors.remove(&name);
+            self.tool_providers.remove(&name);
+        }
+        self.providers.remove(provider_id);
+        Ok(())
+    }
+
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         let mut list: Vec<ToolDescriptor> = self
             .executors
@@ -116,6 +143,19 @@ impl ToolRegistry {
         };
 
         executor.execute(request)
+    }
+
+    /// 遍历全部执行器（工具名 + 执行器），供运行时做健康检查/类型下探
+    pub fn executors(&self) -> Vec<(String, Arc<dyn ToolExecutor>)> {
+        self.executors
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// 工具所属 provider
+    pub fn provider_id_of(&self, tool_name: &str) -> Option<&str> {
+        self.tool_providers.get(tool_name).map(|s| s.as_str())
     }
 
     fn register_executor(

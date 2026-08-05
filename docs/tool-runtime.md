@@ -20,14 +20,14 @@ Tool Runtime 负责统一管理 Agent 可调用能力，包括本地工具、MCP
 
 - `ToolProviderDescriptor`
 - Builtin Provider 注册
-- `.forgeone/plugins`、`.forgeone/mcp`、`.forgeone/skills` 清单发现
-- `tool list` / `plugin list` / `mcp list` / `skill list` CLI 可见性
+- `.forgeone/plugins`、`.forgeone/mcp` 清单发现
+- `tool list` / `plugin list` / `mcp list` CLI 可见性
+- Skill：SKILL.md frontmatter 解析、`{{param}}` 模板渲染、项目级/全局发现、`invoke_skill` 上下文/指令注入（见 [specs/skill-spec.md](../specs/skill-spec.md)）
 
 当前尚未落地：
 
 - 外部 MCP Server 实际连接与调度
 - Plugin Entrypoint 实际加载与执行
-- Skill Entrypoint 实际加载与执行
 
 ## 设计要求
 
@@ -77,6 +77,10 @@ flowchart LR
 ### Skill-backed Tool
 
 由 Skill 触发的高层任务能力，但最终仍需落到标准 Tool 语义。
+
+当前 Skill 采用「上下文/指令注入」语义：`invoke_skill` 加载 SKILL.md 并渲染模板参数，
+渲染后的指令作为 Observation 返回给模型，由模型在 Agent Loop 内自主执行；
+Runtime 不驱动 Skill 内的多步执行（与 Workflow 的边界见 [specs/skill-spec.md](../specs/skill-spec.md)）。
 
 ### Workflow Tool
 

@@ -13,9 +13,10 @@ pub(crate) use plan::*;
 
 use crate::llm_client::{
     LlmBlock, LlmChunk, LlmClient, LlmContent, LlmMessage, LlmProtocol, LlmRequest, LlmResponse,
-    LlmToolCall, builtin_tool_defs,
+    LlmToolCall, LlmToolDef, builtin_tool_defs,
 };
 use forgeone_tools::{ToolCallRequest, ToolCallStatus, ToolRegistry};
+use forgeone_tools::{discover_skills, load_skill, render_skill};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -68,7 +69,9 @@ pub struct HistoryMessage {
 
 pub struct AgentLoop {
     llm: LlmClient,
-    tools: ToolRegistry,
+    tools: std::sync::Mutex<ToolRegistry>,
+    /// 最近使用过的工作区（保活任务按此扫描项目级 MCP）
+    recent_workspaces: std::sync::Mutex<Vec<String>>,
     /// 待审批工具调用表：tool_call_id → oneshot 发送端（前端 /api/agent/approve 投递决定）
     pending_approvals: tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
@@ -77,16 +80,108 @@ impl Default for AgentLoop {
     fn default() -> Self {
         Self {
             llm: LlmClient::new(),
-            tools: ToolRegistry::with_builtin_tools(),
+            tools: std::sync::Mutex::new(ToolRegistry::with_builtin_tools()),
+            recent_workspaces: std::sync::Mutex::new(Vec::new()),
             pending_approvals: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
 
 impl AgentLoop {
+    /// 获取工具注册表（容忍 Mutex 中毒：单个 task panic 后不阻断其他调用）
+    fn tools_registry(&self) -> std::sync::MutexGuard<'_, ToolRegistry> {
+        self.tools.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 记录使用过的工作区（供保活任务扫描项目级 MCP）
+    fn remember_workspace(&self, workspace: &str) {
+        let mut list = self.recent_workspaces.lock().unwrap_or_else(|p| p.into_inner());
+        if !list.iter().any(|w| w == workspace) {
+            list.push(workspace.to_string());
+        }
+    }
+
+    /// 启动 MCP 保活任务：自动连接 + 保持连接。
+    /// 立即执行一轮连接，之后每 `interval` 周期：
+    /// - 自动拉起 failed/新增的 MCP server（全局 + 最近使用过的工作区）
+    /// - 健康检查：断开的连接注销（保留 manifest），下一轮自动重建
+    pub fn start_mcp_keepalive(self: &std::sync::Arc<Self>, interval: std::time::Duration) {
+        let agent = self.clone();
+        tokio::spawn(async move {
+            let a = agent.clone();
+            let _ = tokio::task::spawn_blocking(move || a.keepalive_once()).await;
+            loop {
+                tokio::time::sleep(interval).await;
+                let a = agent.clone();
+                let _ = tokio::task::spawn_blocking(move || a.keepalive_once()).await;
+            }
+        });
+    }
+
+    /// 保活单轮（阻塞，应在 spawn_blocking 中执行）
+    fn keepalive_once(&self) {
+        let workspaces = self
+            .recent_workspaces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        for ws in workspaces.iter() {
+            let (ok, errors) = self.register_workspace_mcp(ws);
+            for e in errors {
+                eprintln!("[KeepAlive] 注册 {ws} 失败: {e}");
+            }
+            if !ok.is_empty() {
+                eprintln!("[KeepAlive] {ws} 已连接: {}", ok.join(", "));
+            }
+        }
+        let (ok, errors) = self.register_workspace_mcp("");
+        for e in errors {
+            eprintln!("[KeepAlive] 全局注册失败: {e}");
+        }
+        if !ok.is_empty() {
+            eprintln!("[KeepAlive] 全局已连接: {}", ok.join(", "));
+        }
+
+        // 健康检查：断开/退出的 client 注销（保留 manifest），下一轮自动重建
+        let dead: Vec<String> = {
+            let registry = self.tools_registry();
+            let mut dead = Vec::new();
+            for (tool_name, executor) in registry.executors() {
+                let Some(mcp) = executor.as_any().downcast_ref::<crate::mcp::McpExecutor>() else {
+                    continue;
+                };
+                if mcp.client.is_alive() {
+                    continue;
+                }
+                if let Some(pid) = registry.provider_id_of(&tool_name) {
+                    dead.push(pid.to_string());
+                }
+            }
+            dead
+        };
+        for pid in dead {
+            let mut registry = self.tools_registry();
+            let _ = registry.remove_provider(&pid);
+            eprintln!("[KeepAlive] MCP server '{pid}' 连接已断开，注销并等待自动重连");
+        }
+    }
+
     /// 运行完整 Agent Loop，通过 tx 推送 AgentEvent
     pub async fn run(&self, req: AgentRunRequest, tx: tokio::sync::mpsc::Sender<AgentEvent>) {
         let mut unconsumed_reviews: u32 = 0;
+
+        // 懒注册 workspace 的 MCP server（幂等：已注册的自动跳过）。
+        // 失败只记录不阻断：MCP server 不可用时 Agent Loop 仍可继续使用内置工具。
+        if !req.workspace.trim().is_empty() {
+            self.remember_workspace(&req.workspace);
+            let (ok, errors) = self.register_workspace_mcp(&req.workspace);
+            if !ok.is_empty() {
+                eprintln!("[AgentLoop] 已注册 MCP server: {}", ok.join(", "));
+            }
+            for e in errors {
+                eprintln!("[AgentLoop] MCP 注册失败: {e}");
+            }
+        }
 
         let protocol = match req.protocol.as_str() {
             "anthropic" => LlmProtocol::Anthropic,
@@ -110,7 +205,22 @@ impl AgentLoop {
             content: LlmContent::Text(req.prompt.clone()),
         });
 
-        let tools = builtin_tool_defs();
+        // 工具表 = 内置静态 schema + 已注册的 MCP 工具（MCP inputSchema 转发给 LLM）
+        let mut tools = builtin_tool_defs();
+        {
+            let registry = self.tools_registry();
+            for d in registry.descriptors() {
+                if d.kind == forgeone_tools::ToolKind::Mcp {
+                    tools.push(LlmToolDef {
+                        name: d.tool_name,
+                        description: d.description,
+                        input_schema: d.input_schema.unwrap_or_else(|| {
+                            serde_json::json!({"type": "object", "properties": {}})
+                        }),
+                    });
+                }
+            }
+        }
 
         // ── 规划阶段：提炼目标并分解执行计划 ────────────────────────
         // 简单任务（短问句/无复杂意图）跳过规划调用，直接以用户原话为目标执行，省一次 LLM 调用
@@ -134,7 +244,29 @@ impl AgentLoop {
             .await.is_err() { return; }
 
         // 目标 + 计划注入每轮 system 上下文（目标锚定）
-        let goal_system = build_goal_system(&req.system_prompt, &goal, &steps);
+        let mut goal_system = build_goal_system(&req.system_prompt, &goal, &steps);
+
+        // Skill 清单注入：发现项目级/全局可用 Skill，以「上下文/指令注入」方式
+        // 告知模型可复用的任务模板；实际调用走 invoke_skill（Agent Loop 拦截执行）。
+        if let Ok(skills) = discover_skills(&req.workspace) {
+            if !skills.is_empty() {
+                let mut listing = String::from("\n\n【可用 Skills】\n以下 Skills 是可复用的任务模板，需要时可调用 invoke_skill 加载并按其指令执行：\n");
+                for skill in &skills {
+                    let description = if skill.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", skill.description)
+                    };
+                    let version = skill
+                        .version
+                        .as_ref()
+                        .map(|v| format!(" (v{v})"))
+                        .unwrap_or_default();
+                    listing.push_str(&format!("- {}{}{}\n", skill.name, version, description));
+                }
+                goal_system.push_str(&listing);
+            }
+        }
 
         // 本轮运行是否执行过工具（纯问答任务跳过自评，省一次 LLM 调用）
         let mut tools_executed = false;
@@ -450,6 +582,77 @@ impl AgentLoop {
             .await.is_err() { return; }
     }
 
+    /// 幂等注册 workspace 下 `.forgeone/mcp/*.json` 声明的 MCP server。
+    /// 返回 `(成功注册的 server 名列表, 失败信息列表)`；重复调用自动跳过已注册项。
+    ///
+    /// 注意：首次注册会同步拉起子进程并完成 MCP 握手（initialize / tools/list），
+    /// 若 server 启动缓慢会阻塞当前线程；注册完成后仅按需调用。
+    pub fn register_workspace_mcp(&self, workspace: &str) -> (Vec<String>, Vec<String>) {
+        let mut registry = self.tools_registry();
+        crate::mcp::register_workspace_mcp_servers(&mut registry, workspace)
+    }
+
+    /// 列出 workspace 下已注册的 MCP server（先幂等注册再收集，保证与实际注册一致）
+    pub fn list_mcp_servers(&self, workspace: &str) -> Vec<crate::mcp::McpServerInfo> {
+        if !workspace.trim().is_empty() {
+            let _ = self.register_workspace_mcp(workspace);
+        }
+        let registry = self.tools_registry();
+        crate::mcp::list_workspace_mcp_servers(&registry, workspace)
+    }
+
+    /// 添加 MCP server：按 `scope`（"global" | "project"）写入对应目录的
+    /// `mcp/{name}.json` 并注册；`transport` 为 "stdio"（entrypoint 启动子进程）
+    /// 或 "sse"（连接 endpoint HTTP+SSE 站点）；注册失败自动回滚
+    pub fn add_mcp_server(
+        &self,
+        workspace: &str,
+        scope: &str,
+        name: &str,
+        transport: &str,
+        entrypoint: &str,
+        endpoint: &str,
+    ) -> Result<crate::mcp::McpServerInfo, String> {
+        let mut registry = self.tools_registry();
+        crate::mcp::add_workspace_mcp_server(
+            &mut registry, scope, workspace, name, transport, entrypoint, endpoint,
+        )
+    }
+
+    /// 删除 MCP server：按 `scope`（"global" | "project"）移除 manifest 并从注册表注销
+    pub fn remove_mcp_server(
+        &self,
+        workspace: &str,
+        scope: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        let mut registry = self.tools_registry();
+        crate::mcp::remove_workspace_mcp_server(&mut registry, scope, workspace, name)
+    }
+
+    /// 查询 MCP server 详细信息（配置 + 工具列表）
+    pub fn get_mcp_server_detail(
+        &self,
+        workspace: &str,
+        scope: &str,
+        name: &str,
+    ) -> Result<crate::mcp::McpServerDetail, String> {
+        let registry = self.tools_registry();
+        crate::mcp::get_mcp_server_detail(&registry, scope, workspace, name)
+    }
+
+    /// 重连 MCP server：对磁盘上有 manifest 但未注册成功的 server 触发注册。
+    /// 已注册的直接返回当前状态；失败返回具体错误（不删除 manifest）。
+    pub fn reconnect_mcp_server(
+        &self,
+        workspace: &str,
+        scope: &str,
+        name: &str,
+    ) -> Result<crate::mcp::McpServerInfo, String> {
+        let mut registry = self.tools_registry();
+        crate::mcp::reconnect_mcp_server(&mut registry, scope, workspace, name)
+    }
+
     /// 调用 forgeone-tools 执行工具
     fn execute_tool(
         &self,
@@ -468,6 +671,15 @@ impl AgentLoop {
                         .unwrap_or_else(|| v.to_string()),
                 );
             }
+        }
+
+        // Skill 拦截：以 workspace 根解析 SKILL.md 并渲染模板参数，
+        // 不依赖进程 cwd，与 invoke_skill 的「上下文/指令注入」语义一致。
+        // （SkillTool 本体保留为兜底；此处注入 workspace 使解析路径正确）
+        if tool_call.name == "invoke_skill" {
+            let name = args.get("name").cloned().unwrap_or_default();
+            let skill = load_skill(workspace, &name)?;
+            return Ok(render_skill(&skill, &args));
         }
 
         // 工作区感知：相对路径统一解析为「工作区根 + 相对路径」。
@@ -513,7 +725,7 @@ impl AgentLoop {
             requested_by: "agent_loop".to_string(),
         };
 
-        let result = self.tools.execute(&request);
+        let result = self.tools_registry().execute(&request);
 
         match result.status {
             ToolCallStatus::Success => {

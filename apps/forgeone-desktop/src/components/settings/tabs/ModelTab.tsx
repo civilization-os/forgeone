@@ -9,8 +9,7 @@ import {
   Server,
   Check,
   Plus,
-  Trash2,
-  Cpu,
+  Trash2,  Cpu,
   Radio,
   Code2,
   ShieldCheck,
@@ -21,10 +20,12 @@ import {
   Play,
   Pencil,
   X,
+  Package,
 } from 'lucide-react'
 import type { ModelProtocol, ModelModality, ModelItem, ProviderConfig } from '../../../types'
 import { TS_OLLAMA_DEMO_SCRIPT } from '../../../lib/tsScriptDemos'
 import { runTsScript, transpileTs, listModelsFromTsScript } from '../../../lib/tsScriptRuntime'
+import { load, getSync, setSync } from '../../../lib/store'
 
 export type { ModelProtocol, ModelModality, ModelItem, ProviderConfig }
 
@@ -108,6 +109,7 @@ const defaultProviders: ProviderConfig[] = [
     status: 'unconfigured',
     isCustomTs: true,
     scriptSource: TS_OLLAMA_DEMO_SCRIPT,
+    tsNpmUrlTemplate: 'https://esm.sh/{pkg}',
     models: [
       { id: 'custom-ts-script-driver', name: 'TS Custom Driver', modality: 'multimodal', supportsTools: true, supportsThinking: true, contextLength: '128k' },
     ],
@@ -159,40 +161,43 @@ function migrateProvider(p: any): ProviderConfig {
         : p.baseUrl,
     customHeaders: p.customHeaders ?? {},
     apiKey: p.protocol === 'ollama' ? '' : (p.apiKey ?? ''),
+    // TS 驱动 npm 加载源：旧数据缺省时用默认 esm.sh 模板
+    tsNpmUrlTemplate:
+      p.protocol === 'ts-script' || p.isCustomTs
+        ? typeof p.tsNpmUrlTemplate === 'string' && p.tsNpmUrlTemplate.includes('{pkg}')
+          ? p.tsNpmUrlTemplate
+          : 'https://esm.sh/{pkg}'
+        : p.tsNpmUrlTemplate,
     models,
   }
 }
 
 export default function ModelTab({ activeModel, setActiveModel }: ModelTabProps) {
-  // 1. 优先读取 LocalStorage，旧版数据自动迁移补全字段
-  const [providers, setProviders] = useState<ProviderConfig[]>(() => {
-    try {
-      // 清理旧版 key，避免旧数据污染
-      for (const oldKey of ['forgeone_model_providers_v1', 'forgeone_model_providers_v2', 'forgeone_model_providers_v3']) {
-        localStorage.removeItem(oldKey)
-      }
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        const parsed = JSON.parse(saved)
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map(migrateProvider)
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load model config:', e)
-    }
-    return defaultProviders
-  })
+  // 标准桌面存储：默认配置起步，启动时异步载入文件数据（旧 localStorage 由 store 自动迁移）
+  const [providers, setProviders] = useState<ProviderConfig[]>(defaultProviders)
+  // load 完成前禁止落盘，避免默认值覆盖已迁移/已有文件数据
+  const [storeLoaded, setStoreLoaded] = useState(false)
 
-  // 自动落盘
   useEffect(() => {
+    load().then(() => {
+      const saved = getSync<ProviderConfig[]>(STORAGE_KEY)
+      if (Array.isArray(saved) && saved.length > 0) {
+        setProviders(saved.map(migrateProvider))
+      }
+      setStoreLoaded(true)
+    })
+  }, [])
+
+  // 自动落盘（仅在 store 载入完成后）
+  useEffect(() => {
+    if (!storeLoaded) return
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(providers))
+      setSync(STORAGE_KEY, providers)
       window.dispatchEvent(new Event('forgeone_models_updated'))
     } catch (e) {
       console.error('Failed to save model config:', e)
     }
-  }, [providers])
+  }, [providers, storeLoaded])
 
   const [selectedProviderId, setSelectedProviderId] = useState<string>('openai')
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -653,6 +658,20 @@ export default function ModelTab({ activeModel, setActiveModel }: ModelTabProps)
                 className="w-full px-3 py-1.5 border border-[#E2E3E1] rounded-lg text-xs font-mono outline-none focus:border-[#1A1C1B] bg-white"
               />
             </div>
+            <div>
+              <label className="text-[11px] font-medium text-[#46474A] block mb-1 flex items-center gap-1">
+                <Package size={12} className="text-[#2D63ED]" /> npm 包加载地址模板
+              </label>
+              <input
+                type="text" value={selectedProvider.tsNpmUrlTemplate || 'https://esm.sh/{pkg}'}
+                onChange={(e) => updateProvider('tsNpmUrlTemplate', e.target.value)}
+                placeholder="https://esm.sh/{pkg}"
+                className="w-full px-3 py-1.5 border border-[#E2E3E1] rounded-lg text-xs font-mono outline-none focus:border-[#1A1C1B] bg-white"
+              />
+              <p className="text-[10px] text-[#76777B] mt-1 leading-relaxed">
+                <code>{'{pkg}'}</code> 会被替换为包名。支持 esm.sh / jsdelivr（<code>{'https://cdn.jsdelivr.net/npm/{pkg}/+esm'}</code>）/ unpkg / 自建代理等，需返回 ESM 格式。
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -683,7 +702,7 @@ export default function ModelTab({ activeModel, setActiveModel }: ModelTabProps)
               onClick={async () => {
                 try {
                   const source = selectedProvider.scriptSource || TS_OLLAMA_DEMO_SCRIPT
-                  const list = await listModelsFromTsScript(source, selectedProvider.baseUrl)
+                  const list = await listModelsFromTsScript(source, selectedProvider.baseUrl, selectedProvider.tsNpmUrlTemplate)
                   if (list.length === 0) {
                     alert('脚本未返回模型列表（脚本需导出 listModels，Ollama 需已运行）')
                     return
@@ -705,7 +724,8 @@ export default function ModelTab({ activeModel, setActiveModel }: ModelTabProps)
               <RefreshCw size={13} /> 获取模型列表（Ollama /api/tags）
             </button>
             <div className="p-3 bg-[#EBF3FF] border border-[#BFDBFE] rounded-lg text-[11px] text-[#1E40AF] leading-relaxed">
-              💡 TS 驱动通过脚本连接模型（默认内置 Ollama Demo，无需本地文件）。<b>在线编辑</b>可修改脚本（鉴权 / 转发 / 后处理）；<b>在线测试</b>直接运行脚本验证连通性。脚本契约：导出 <code>runModel</code>。
+              💡 TS 驱动通过脚本连接模型（默认内置 Ollama Demo，无需本地文件）。<b>在线编辑</b>可修改脚本（鉴权 / 转发 / 后处理）；<b>在线测试</b>直接运行脚本验证连通性。脚本契约：导出 <code>runModel</code>。<br />
+              📦 脚本内 <code>import</code> 支持<b>任意 npm 包</b>（通过 esm.sh CDN 在线加载，如 <code>import axios from 'axios'</code>）。需要网络；包的正确性与加载失败由脚本作者自行负责。不支持相对路径/内置模块 import。
             </div>
             <div className="p-3.5 bg-[#F9F9F7] rounded-xl border border-[#E8E8E6] space-y-2.5">
               <div className="flex items-center justify-between">
@@ -727,7 +747,12 @@ export async function runModel(params: {
 // 获取模型列表（可选导出，供「获取模型列表」按钮）
 export async function listModels(params: {
   baseUrl: string
-}): Promise<{ id: string; name: string }[]>`}</pre>
+}): Promise<{ id: string; name: string }[]>
+
+// 示例：import 任意 npm 包（经 esm.sh CDN 在线加载，需网络）
+// import axios from 'axios'
+// import { twMerge } from 'tailwind-merge'
+// import _ from 'lodash'   // 动态: const _ = await import('lodash')`}</pre>
               </div>
             </div>
           </div>

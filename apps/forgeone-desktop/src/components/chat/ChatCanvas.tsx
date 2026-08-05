@@ -36,6 +36,7 @@ import { estimateTokenCount, readSSEStream } from '../../lib/chatParse'
 import type { StreamChunkMeta } from '../../lib/chatParse'
 import { runAgentLoop } from '../../lib/agentLoop'
 import { buildForgeOneSystemPrompt } from '../../lib/systemPrompt'
+import { getSync } from '../../lib/store'
 import { runTsScript } from '../../lib/tsScriptRuntime'
 import { TS_OLLAMA_DEMO_SCRIPT } from '../../lib/tsScriptDemos'
 import type { ChatMessage, ModelItem, ExecutionBlock, ProjectInfo, ChatSession, RuntimeStats, PlanStepStatus } from '../../types'
@@ -206,9 +207,9 @@ export default function ChatCanvas({
       for (const oldKey of ['forgeone_model_providers_v1', 'forgeone_model_providers_v2', 'forgeone_model_providers_v3']) {
         localStorage.removeItem(oldKey)
       }
-      const saved = localStorage.getItem('forgeone_model_providers_v5') || localStorage.getItem('forgeone_model_providers_v4')
+      const saved = getSync<any[]>('forgeone_model_providers_v5') ?? getSync<any[]>('forgeone_model_providers_v4')
       if (saved) {
-        const providers = JSON.parse(saved)
+        const providers = saved
         const readyList: ConnectedModelInfo[] = []
 
         providers.forEach((p: any) => {
@@ -764,8 +765,8 @@ export default function ChatCanvas({
     try {
       let savedProviders: any[] = []
       try {
-        const saved = localStorage.getItem('forgeone_model_providers_v5') || localStorage.getItem('forgeone_model_providers_v4')
-        if (saved) savedProviders = JSON.parse(saved)
+        const v5 = getSync<any[]>('forgeone_model_providers_v5')
+        savedProviders = v5 ?? getSync<any[]>('forgeone_model_providers_v4') ?? []
       } catch (e) {
         console.error('Failed to parse providers:', e)
       }
@@ -965,6 +966,7 @@ export default function ChatCanvas({
         await runTsScript(source, {
           model: activeModel,
           baseUrl: matchedProvider.baseUrl || '',
+          npmUrlTemplate: matchedProvider.tsNpmUrlTemplate,
           messages: [...history, { role: 'user', content: userText }],
           onDelta: (text, reasoning) => {
             if (reasoning) updateAssistantMessage('', reasoning)
@@ -1304,9 +1306,6 @@ export default function ChatCanvas({
               )}
             </div>
           )}
-
-          <span className="text-xs text-[#76777B]">|</span>
-          <span className="text-xs text-[#76777B] font-mono">Max Loops: 12</span>
         </div>
       </div>
 

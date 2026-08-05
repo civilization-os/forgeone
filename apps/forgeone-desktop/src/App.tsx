@@ -12,18 +12,13 @@ import SettingsModal from './components/settings/SettingsModal'
 import OpenProjectModal from './components/project/OpenProjectModal'
 import StatusBar from './components/statusbar/StatusBar'
 import type { TabType, SettingsTabType, ProjectInfo, ChatSession, ChatMessage, RuntimeStats } from './types'
+import { load, getSync, setSync } from './lib/store'
 
 const STORAGE_PROJECTS_KEY = 'forgeone_custom_projects_v2'
 const STORAGE_SESSIONS_KEY = 'forgeone_sessions_v1'
 
-export const INITIAL_PROJECT_PRESETS: ProjectInfo[] = [
-  { id: 'forgeone', name: 'forgeone', path: 'd:\\project\\forgeone', isPinned: false },
-  { id: 'aischool', name: 'AISchool', path: 'd:\\project\\aischool', isPinned: false },
-  { id: 'component-one', name: 'component-one', path: 'd:\\project\\component-one', isPinned: false },
-  { id: 'langgraph-flow', name: 'Langgraph Flow', path: 'd:\\project\\langgraph-flow', isPinned: false },
-  { id: 'claude-cli-plugins', name: 'Claude Cli Plugins Plus', path: 'd:\\project\\claude-cli-plugins', isPinned: false },
-  { id: 'forgeone-web', name: 'forgeone-web-harness', path: 'd:\\project\\forgeone-web', isPinned: false },
-]
+// 旧版本内置的预置项目 id（用于清理用户 localStorage 中的残留，彻底移除内置项目）
+const PRESET_PROJECT_IDS = new Set(['forgeone', 'aischool', 'component-one', 'langgraph-flow', 'claude-cli-plugins', 'forgeone-web'])
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('chat')
@@ -35,57 +30,45 @@ export default function App() {
   const [currentProject, setCurrentProject] = useState<ProjectInfo | null>(null)
   const [isOpenProjectModalOpen, setIsOpenProjectModalOpen] = useState(false)
 
-  // 项目列表（持久化保存在 localStorage）
-  const [projects, setProjects] = useState<ProjectInfo[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PROJECTS_KEY)
-      if (saved) {
-        const parsed = JSON.parse(saved)
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed
+  // 项目列表（标准桌面存储：app_config_dir 文件；启动时异步加载）
+  const [projects, setProjects] = useState<ProjectInfo[]>([])
+
+  // 会话列表（标准桌面存储：app_config_dir 文件；启动时异步加载）
+  const [sessions, setSessions] = useState<ChatSession[]>([])
+
+  // 启动时从文件存储载入项目与会话；旧 localStorage 数据由 store 自动迁移
+  const [storeLoaded, setStoreLoaded] = useState(false)
+  useEffect(() => {
+    load().then(() => {
+      const savedProjects = getSync<ProjectInfo[]>(STORAGE_PROJECTS_KEY)
+      if (Array.isArray(savedProjects)) {
+        // 过滤掉旧版内置预置项目残留，只保留用户自己关联的项目
+        setProjects(savedProjects.filter((p) => !PRESET_PROJECT_IDS.has(p.id)))
       }
-    } catch (e) {}
-    return INITIAL_PROJECT_PRESETS
-  })
+      const savedSessions = getSync<ChatSession[]>(STORAGE_SESSIONS_KEY)
+      if (Array.isArray(savedSessions)) {
+        setSessions(savedSessions)
+      }
+      setStoreLoaded(true)
+    })
+  }, [])
 
   useEffect(() => {
+    if (!storeLoaded) return
     try {
-      localStorage.setItem(STORAGE_PROJECTS_KEY, JSON.stringify(projects))
+      setSync(STORAGE_PROJECTS_KEY, projects)
     } catch (e) {}
-  }, [projects])
-
-  // 会话列表（持久化保存在 localStorage）
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_SESSIONS_KEY)
-      if (saved) {
-        const parsed = JSON.parse(saved)
-        if (Array.isArray(parsed)) return parsed
-      }
-    } catch (e) {}
-    return []
-  })
-
-  // 持久化会话到 localStorage；容量超限时降级保留最近 20 个会话（避免静默丢数据）
-  const persistSessions = (list: ChatSession[]) => {
-    try {
-      localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(list))
-    } catch (e) {
-      console.warn('[App] 会话存储超出 localStorage 容量，仅保留最近 20 个会话:', e)
-      const trimmed = list.slice(-20)
-      try {
-        localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(trimmed))
-        setSessions(trimmed)
-      } catch (e2) {
-        console.error('[App] 会话持久化失败（localStorage 不可用）:', e2)
-      }
-    }
-  }
+  }, [projects, storeLoaded])
 
   useEffect(() => {
     if (sessions.length === 0) return
     // 防抖：流式生成期间高频 setSessions，停止写入后 500ms 才持久化一次
     const timer = setTimeout(() => {
-      persistSessions(sessions)
+      try {
+        setSync(STORAGE_SESSIONS_KEY, sessions)
+      } catch (e) {
+        console.warn('[App] 会话存储失败:', e)
+      }
     }, 500)
     return () => clearTimeout(timer)
   }, [sessions])
@@ -377,6 +360,7 @@ export default function App() {
         activeModel={activeModel}
         setActiveModel={setActiveModel}
         initialTab={settingsInitialTab}
+        workspace={currentProject?.path || null}
       />
 
       {/* Open/Bind Custom Folder Project Modal */}

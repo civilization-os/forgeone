@@ -139,5 +139,17 @@ pub fn builtin_tool_defs() -> Vec<LlmToolDef> {
                 }
             }),
         },
+        LlmToolDef {
+            name: "invoke_skill".to_string(),
+            description: "加载并执行一个 Skill（可复用的任务模板）。提供 skill 的 'name' 作为参数；skill 内 {{param}} 占位符通过同名参数传入。可用 skill 清单已注入系统上下文。".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "skill 名称（frontmatter name）" }
+                },
+                "required": ["name"],
+                "additionalProperties": { "type": "string", "description": "skill 模板参数" }
+            }),
+        },
     ]
 }

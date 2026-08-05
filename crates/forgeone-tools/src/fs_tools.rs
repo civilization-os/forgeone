@@ -15,6 +15,7 @@ impl ToolExecutor for ReadFileTool {
             description: "Read a file from the local workspace".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 
@@ -70,6 +71,7 @@ impl ToolExecutor for SearchContentTool {
             description: "Search file contents by regex pattern across the workspace".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 
@@ -196,6 +198,7 @@ impl ToolExecutor for SearchFilesTool {
             description: "Find files by name pattern in the workspace".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 
@@ -274,6 +277,7 @@ impl ToolExecutor for WriteFileTool {
             description: "Write content to a file, overwriting if it exists".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_write".to_string()],
+        input_schema: None,
         }
     }
 
@@ -331,6 +335,7 @@ impl ToolExecutor for EditFileTool {
             description: "Edit a file by finding unique text and replacing it".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_write".to_string()],
+        input_schema: None,
         }
     }
 
@@ -391,6 +396,7 @@ impl ToolExecutor for GlobTool {
             description: "List files matching a glob pattern (e.g. **/*.rs, crates/**/Cargo.toml)".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 
@@ -511,6 +517,7 @@ impl ToolExecutor for DirectoryTreeTool {
             description: "Show directory tree structure with indentation".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 
@@ -626,6 +633,7 @@ impl ToolExecutor for DiffTool {
             description: "Compare two files and return structured differences".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["fs_read".to_string()],
+        input_schema: None,
         }
     }
 

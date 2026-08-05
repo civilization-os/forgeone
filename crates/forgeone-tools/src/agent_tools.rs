@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::skill::{parse_skill, render_skill};
 use crate::types::*;
 use crate::util::{error_result, now_ms};
 
@@ -10,9 +11,17 @@ impl ToolExecutor for SkillTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             tool_name: "invoke_skill".to_string(),
-            description: "Load and execute a skill (a reusable task template). Provide the skill 'name' as argument. Available skills can be discovered with glob or directory_tree.".to_string(),
+            description: "加载并执行一个 Skill（可复用的任务模板）。提供 skill 的 'name' 作为参数；skill 内 {{param}} 占位符通过同名参数传入。可用 skill 清单由运行时注入上下文。".to_string(),
             kind: ToolKind::Skill,
             required_permissions: vec!["fs_read".to_string()],
+            input_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "skill 名称（frontmatter name）" }
+                },
+                "required": ["name"],
+                "additionalProperties": { "type": "string", "description": "skill 模板参数" }
+            })),
         }
     }
 
@@ -22,27 +31,33 @@ impl ToolExecutor for SkillTool {
             None => return error_result(request, "missing_argument=name"),
         };
 
-        // Look for .forgeone/skills/<name>/SKILL.md
+        // 默认相对当前工作目录解析；Agent Loop 拦截时以 workspace 根解析
         let skill_path = std::path::PathBuf::from(".forgeone/skills").join(name).join("SKILL.md");
         if !skill_path.exists() {
             return error_result(request, &format!("skill_not_found: {name} (looked at .forgeone/skills/{name}/SKILL.md)"));
         }
 
-        match std::fs::read_to_string(&skill_path) {
-            Ok(content) => {
-                let mut structured_output = std::collections::HashMap::new();
-                structured_output.insert("skill".to_string(), name.clone());
-                structured_output.insert("content".to_string(), content);
+        let content = match std::fs::read_to_string(&skill_path) {
+            Ok(c) => c,
+            Err(e) => return error_result(request, &format!("read_failed={e}")),
+        };
+        let definition = match parse_skill(&content) {
+            Ok(d) => d,
+            Err(e) => return error_result(request, &format!("invalid_skill={name}: {e}")),
+        };
+        let rendered = render_skill(&definition, &request.arguments);
 
-                ToolCallResult {
-                    call_id: request.call_id.clone(),
-                    status: ToolCallStatus::Success,
-                    structured_output,
-                    error: None,
-                    completed_at_ms: now_ms(),
-                }
-            }
-            Err(e) => error_result(request, &format!("read_failed={e}")),
+        let mut structured_output = HashMap::new();
+        structured_output.insert("skill".to_string(), name.clone());
+        structured_output.insert("description".to_string(), definition.description);
+        structured_output.insert("content".to_string(), rendered);
+
+        ToolCallResult {
+            call_id: request.call_id.clone(),
+            status: ToolCallStatus::Success,
+            structured_output,
+            error: None,
+            completed_at_ms: now_ms(),
         }
     }
 }
@@ -57,6 +72,7 @@ impl ToolExecutor for InvokeSubAgentTool {
             description: "Spawn a sub-agent to handle a specific sub-task. Provide a detailed prompt in 'task' argument. You can optionally provide 'budget' (e.g. 5000). The runtime intercepts this tool and runs a sub-agent, returning the final result.".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec![],
+        input_schema: None,
         }
     }
 

@@ -61,6 +61,7 @@ ${thinkingInstruction}
      · glob — 按 glob 模式匹配文件路径
      · git — 执行 git 命令（status / diff / log 等）
      · diagnostics — 运行 cargo check 获取编译器诊断
+     · invoke_skill — 加载并执行 Skill 任务模板（系统上下文会注入可用 Skills 清单，按其指令执行）
      · write_file / edit_file / shell / diff — 写文件、局部修改、执行命令、对比差异（高危，需要审批）
    - 当用户提到一个文件但只给文件名、不确定其完整路径时：**先调用 search_files 或 glob 在工作区根目录下定位文件真实路径，确认后再用 read_file 读取**；禁止把纯文件名当作完整路径直接读取，禁止臆造不存在的路径。
    - 给工具传 path 参数时统一使用相对工作区根目录的路径（如 crates/forgeone-runtime/src/lib.rs），不要带盘符前缀。

@@ -102,4 +102,6 @@ export interface ProviderConfig {
   isCustomTs?: boolean
   /** TS 脚本驱动：脚本源码（转译后执行，可在线编辑/测试） */
   scriptSource?: string
+  /** TS 脚本驱动：npm 包加载地址模板（{pkg} 会被替换为包名），默认 https://esm.sh/{pkg} */
+  tsNpmUrlTemplate?: string
 }

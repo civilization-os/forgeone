@@ -11,7 +11,10 @@ pub const BUILTIN_PROVIDER_ID: &str = "forgeone.builtin";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolProviderSource {
     Builtin,
+    /// 项目级：`{workspace}/.forgeone/{mcp,plugins}/*.json`
     WorkspaceManifest { manifest_path: PathBuf },
+    /// 全局（用户级）：`{user_home}/.forgeone/{mcp,plugins}/*.json`，对所有项目生效
+    GlobalManifest { manifest_path: PathBuf },
     RuntimeRegistration,
 }
 
@@ -21,6 +24,9 @@ impl ToolProviderSource {
             Self::Builtin => "builtin".to_string(),
             Self::WorkspaceManifest { manifest_path } => {
                 format!("manifest:{}", manifest_path.display())
+            }
+            Self::GlobalManifest { manifest_path } => {
+                format!("global_manifest:{}", manifest_path.display())
             }
             Self::RuntimeRegistration => "runtime_registration".to_string(),
         }
@@ -59,7 +65,12 @@ pub struct RegisteredToolDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredExtension {
     pub provider: ToolProviderDescriptor,
+    /// stdio 传输的启动命令（`transport = "stdio"` 时使用）
     pub entrypoint: Option<String>,
+    /// 传输类型："stdio"（默认）| "sse"（HTTP+SSE）
+    pub transport: Option<String>,
+    /// sse 传输的 base URL（`transport = "sse"` 时使用）
+    pub endpoint: Option<String>,
     pub required_permissions: Vec<String>,
     pub tools: Vec<ToolDescriptor>,
 }
@@ -79,7 +90,6 @@ impl DiscoveredExtension {
 pub enum ExtensionSurface {
     Mcp,
     Plugin,
-    Skill,
 }
 
 impl ExtensionSurface {
@@ -87,7 +97,6 @@ impl ExtensionSurface {
         match self {
             Self::Mcp => "mcp",
             Self::Plugin => "plugin",
-            Self::Skill => "skill",
         }
     }
 
@@ -95,7 +104,6 @@ impl ExtensionSurface {
         match self {
             Self::Mcp => "mcp",
             Self::Plugin => "plugins",
-            Self::Skill => "skills",
         }
     }
 
@@ -103,7 +111,6 @@ impl ExtensionSurface {
         match self {
             Self::Mcp => ToolKind::Mcp,
             Self::Plugin => ToolKind::Plugin,
-            Self::Skill => ToolKind::Skill,
         }
     }
 }
@@ -123,6 +130,10 @@ struct ExtensionManifest {
     version: Option<String>,
     description: String,
     entrypoint: Option<String>,
+    /// 传输类型："stdio"（默认）| "sse"
+    transport: Option<String>,
+    /// sse 传输的 base URL
+    endpoint: Option<String>,
     required_permissions: Option<Vec<String>>,
     tools: Vec<DeclaredToolManifest>,
 }
@@ -134,42 +145,84 @@ struct DeclaredToolManifest {
     required_permissions: Option<Vec<String>>,
 }
 
-pub fn discover_workspace_extensions(
-    workspace_root: impl AsRef<Path>,
-) -> Result<Vec<DiscoveredExtension>, String> {
-    let mut discovered = Vec::new();
+/// 用户主目录下的 `.forgeone` 目录：
+/// Windows 为 `%USERPROFILE%\.forgeone`，Unix 为 `$HOME/.forgeone`。
+#[cfg(windows)]
+pub fn user_forgeone_dir() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
+        .ok()
+        .map(|p| Path::new(&p).join(".forgeone"))
+}
 
-    for surface in [
-        ExtensionSurface::Mcp,
-        ExtensionSurface::Plugin,
-        ExtensionSurface::Skill,
-    ] {
-        let directory = workspace_root
-            .as_ref()
-            .join(".forgeone")
-            .join(surface.directory_name());
-        if !directory.exists() {
+/// 用户主目录下的 `.forgeone` 目录：
+/// Windows 为 `%USERPROFILE%\.forgeone`，Unix 为 `$HOME/.forgeone`。
+#[cfg(not(windows))]
+pub fn user_forgeone_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|p| Path::new(&p).join(".forgeone"))
+}
+
+/// 扫描 `.forgeone/{surface}/` 目录下的 json manifest
+fn scan_extensions_in(
+    forgeone_dir: &Path,
+    surface: ExtensionSurface,
+    source_for: &dyn Fn(&Path) -> ToolProviderSource,
+) -> Result<Vec<DiscoveredExtension>, String> {
+    let directory = forgeone_dir.join(surface.directory_name());
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = fs::read_dir(&directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?;
+
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "failed to read manifest entry under {}: {error}",
+                directory.display()
+            )
+        })?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
 
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?;
+        found.push(parse_extension_manifest(surface, &path, source_for(&path))?);
+    }
+    Ok(found)
+}
 
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                format!(
-                    "failed to read manifest entry under {}: {error}",
-                    directory.display()
-                )
-            })?;
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
-            {
-                continue;
-            }
+/// 发现 workspace 下（项目级）的扩展 manifest
+pub fn discover_workspace_extensions(
+    workspace_root: impl AsRef<Path>,
+) -> Result<Vec<DiscoveredExtension>, String> {
+    let forgeone_dir = workspace_root.as_ref().join(".forgeone");
+    discover_extensions_in(&forgeone_dir, &|path| ToolProviderSource::WorkspaceManifest {
+        manifest_path: path.to_path_buf(),
+    })
+}
 
-            discovered.push(parse_extension_manifest(surface, &path)?);
-        }
+/// 发现用户主目录下（全局级）的扩展 manifest，对所有项目生效
+pub fn discover_global_extensions() -> Result<Vec<DiscoveredExtension>, String> {
+    let Some(forgeone_dir) = user_forgeone_dir() else {
+        return Ok(Vec::new());
+    };
+    discover_extensions_in(&forgeone_dir, &|path| ToolProviderSource::GlobalManifest {
+        manifest_path: path.to_path_buf(),
+    })
+}
+
+fn discover_extensions_in(
+    forgeone_dir: &Path,
+    source_for: &dyn Fn(&Path) -> ToolProviderSource,
+) -> Result<Vec<DiscoveredExtension>, String> {
+    let mut discovered = Vec::new();
+
+    for surface in [ExtensionSurface::Mcp, ExtensionSurface::Plugin] {
+        discovered.extend(scan_extensions_in(forgeone_dir, surface, source_for)?);
     }
 
     discovered.sort_by(|left, right| {
@@ -186,6 +239,7 @@ pub fn discover_workspace_extensions(
 fn parse_extension_manifest(
     expected_surface: ExtensionSurface,
     manifest_path: &Path,
+    source: ToolProviderSource,
 ) -> Result<DiscoveredExtension, String> {
     let content = fs::read_to_string(manifest_path)
         .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
@@ -226,9 +280,7 @@ fn parse_extension_manifest(
         kind,
         version: manifest.version.clone(),
         description: manifest.description.clone(),
-        source: ToolProviderSource::WorkspaceManifest {
-            manifest_path: manifest_path.to_path_buf(),
-        },
+        source,
     };
 
     let tools = manifest
@@ -239,12 +291,16 @@ fn parse_extension_manifest(
             description: tool.description,
             kind,
             required_permissions: tool.required_permissions.unwrap_or_default(),
+            // 清单暂不声明 JSON Schema；如需 LLM 可调用，由运行时补充
+            input_schema: None,
         })
         .collect();
 
     Ok(DiscoveredExtension {
         provider,
         entrypoint: manifest.entrypoint,
+        transport: manifest.transport,
+        endpoint: manifest.endpoint,
         required_permissions: manifest.required_permissions.unwrap_or_default(),
         tools,
     })

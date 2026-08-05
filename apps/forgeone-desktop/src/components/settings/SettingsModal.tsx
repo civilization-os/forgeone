@@ -15,6 +15,8 @@ interface SettingsModalProps {
   activeModel: string
   setActiveModel: (model: string) => void
   initialTab?: SettingsTabType
+  /** 当前绑定的工作区路径（MCP 配置落盘与注册使用） */
+  workspace?: string | null
 }
 
 export default function SettingsModal({
@@ -23,6 +25,7 @@ export default function SettingsModal({
   activeModel,
   setActiveModel,
   initialTab = 'model',
+  workspace = null,
 }: SettingsModalProps) {
   const { t } = useTranslation()
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabType>(initialTab)
@@ -106,8 +109,8 @@ export default function SettingsModal({
             {activeSettingsTab === 'model' && (
               <ModelTab activeModel={activeModel} setActiveModel={setActiveModel} />
             )}
-            {activeSettingsTab === 'mcp' && <McpTab />}
-            {activeSettingsTab === 'skill' && <SkillTab />}
+            {activeSettingsTab === 'mcp' && <McpTab workspace={workspace} />}
+            {activeSettingsTab === 'skill' && <SkillTab workspace={workspace} />}
             {activeSettingsTab === 'policy' && <PolicyTab />}
             {activeSettingsTab === 'trace' && <TraceTab />}
           </div>

@@ -64,6 +64,10 @@ pub struct ToolDescriptor {
     pub description: String,
     pub kind: ToolKind,
     pub required_permissions: Vec<String>,
+    /// JSON Schema（`{"type":"object",...}`），传给 LLM 的 tools 参数。
+    /// 内置工具由 `builtin_tool_defs()` 静态表提供；MCP / Plugin / Skill
+    /// 等外部工具在注册/发现时填充。
+    pub input_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,4 +118,9 @@ pub struct Observation {
 pub trait ToolExecutor: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
     fn execute(&self, request: &ToolCallRequest) -> ToolCallResult;
+
+    /// 类型下探：运行时用于识别具体执行器（如 MCP 执行器做健康检查）
+    fn as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
 }

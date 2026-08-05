@@ -15,6 +15,7 @@ impl ToolExecutor for ShellTool {
             description: "Run a shell command and capture output".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["cmd_exec".to_string()],
+        input_schema: None,
         }
     }
 
@@ -108,6 +109,7 @@ impl ToolExecutor for GitTool {
             description: "Run git commands (status, diff, log, show, branch)".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["cmd_exec".to_string()],
+        input_schema: None,
         }
     }
 
@@ -178,6 +180,7 @@ impl ToolExecutor for DiagnosticsTool {
             description: "Run cargo check and return structured compiler diagnostics".to_string(),
             kind: ToolKind::Builtin,
             required_permissions: vec!["cmd_exec".to_string()],
+        input_schema: None,
         }
     }
 

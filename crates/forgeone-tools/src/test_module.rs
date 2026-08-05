@@ -5,6 +5,7 @@ mod tests {
     use crate::{SkillTool, 
         DiffTool, DirectoryTreeTool, EditFileTool, GitTool, GlobTool, SearchContentTool, ShellTool,
         ToolCallRequest, ToolCallStatus, ToolExecutor, ToolRegistry, next_tool_call_id,
+        discover_skills, load_skill, parse_skill, render_skill,
     };
 
     #[test]
@@ -289,7 +290,11 @@ let result = SkillTool.execute(&ToolCallRequest {
         });
 assert_eq!(result.status, ToolCallStatus::Success);
         let c = result.structured_output.get("content").map(String::as_str).unwrap_or("");
-        assert!(c.contains("test-skill"), "should contain skill content");
+        assert!(c.contains("When invoked"), "should contain skill body");
+        assert_eq!(
+            result.structured_output.get("description").map(String::as_str),
+            Some("A test skill for ForgeOne")
+        );
     }
 
     #[test]
@@ -307,5 +312,140 @@ let result = SkillTool.execute(&ToolCallRequest {
             requested_by: "runtime".to_string(),
         });
         assert_eq!(result.status, ToolCallStatus::ValidationError);
+    }
+
+    // ── skill 解析 / 渲染 / 发现 ──
+    // 注意：发现/加载测试使用运行时创建的临时目录，不依赖被 .gitignore
+    // 忽略的 .forgeone/ 目录，保证 clone 后测试可复现。
+
+    #[test]
+    fn parse_skill_parses_frontmatter_and_body() {
+        let content = "---\nname: demo\nversion: 1.0.0\n---\n\nBody text here.";
+        let skill = parse_skill(content).unwrap();
+        assert_eq!(skill.name, "demo");
+        assert_eq!(skill.description, "");
+        assert_eq!(skill.version.as_deref(), Some("1.0.0"));
+        assert_eq!(skill.body, "Body text here.");
+    }
+
+    #[test]
+    fn parse_skill_accepts_quoted_values() {
+        let content = "---\nname: \"demo\"\ndescription: '中文描述'\n---\nbody";
+        let skill = parse_skill(content).unwrap();
+        assert_eq!(skill.name, "demo");
+        assert_eq!(skill.description, "中文描述");
+    }
+
+    #[test]
+    fn parse_skill_requires_valid_frontmatter() {
+        assert!(parse_skill("---\ndescription: no name\n---\nbody").is_err());
+        assert!(parse_skill("no frontmatter at all").is_err());
+        assert!(parse_skill("---\nname: x").is_err(), "missing closing delimiter");
+    }
+
+    #[test]
+    fn render_skill_substitutes_parameters() {
+        let skill = parse_skill("---\nname: demo\n---\nReview {{path}} with {{depth}} depth.").unwrap();
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), "src/main.rs".to_string());
+        let rendered = render_skill(&skill, &args);
+        assert!(rendered.contains("Review src/main.rs with {{depth}} depth."));
+    }
+
+    /// 临时工作区：创建 .forgeone/skills 下的若干 SKILL.md，返回根路径
+    fn make_temp_workspace() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "forgeone_skill_test_{}_{}",
+            std::process::id(),
+            next_tool_call_id()
+        ));
+        std::fs::create_dir_all(root.join(".forgeone").join("skills")).expect("create skills dir");
+        root
+    }
+
+    #[test]
+    fn discover_skills_finds_workspace_skills_sorted_by_name() {
+        let root = make_temp_workspace();
+        let skills_dir = root.join(".forgeone").join("skills");
+
+        // 目录名与 frontmatter name 解耦：beta 目录里放 name=alpha-skill
+        std::fs::create_dir_all(skills_dir.join("beta")).unwrap();
+        std::fs::write(
+            skills_dir.join("beta").join("SKILL.md"),
+            "---\nname: alpha-skill\ndescription: a\n---\nbody",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skills_dir.join("alpha")).unwrap();
+        std::fs::write(
+            skills_dir.join("alpha").join("SKILL.md"),
+            "---\nname: beta-skill\ndescription: b\n---\nbody",
+        )
+        .unwrap();
+
+        let skills = discover_skills(&root).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha-skill", "beta-skill"], "按 name 排序");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_skills_skips_invalid_skill_files() {
+        let root = make_temp_workspace();
+        let skills_dir = root.join(".forgeone").join("skills");
+
+        // 缺 name 的无效 skill 应被跳过，不影响其它 skill
+        std::fs::create_dir_all(skills_dir.join("broken")).unwrap();
+        std::fs::write(
+            skills_dir.join("broken").join("SKILL.md"),
+            "---\ndescription: no name\n---\nbody",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skills_dir.join("ok")).unwrap();
+        std::fs::write(
+            skills_dir.join("ok").join("SKILL.md"),
+            "---\nname: ok\ndescription: fine\n---\nbody",
+        )
+        .unwrap();
+
+        let skills = discover_skills(&root).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_skill_matches_frontmatter_name() {
+        let root = make_temp_workspace();
+        std::fs::create_dir_all(root.join(".forgeone").join("skills").join("any-dir")).unwrap();
+        std::fs::write(
+            root.join(".forgeone").join("skills").join("any-dir").join("SKILL.md"),
+            "---\nname: demo\n---\nBody with {{topic}}.",
+        )
+        .unwrap();
+
+        let skill = load_skill(&root, "demo").unwrap();
+        assert_eq!(skill.name, "demo");
+        assert!(skill.body.contains("{{topic}}"));
+        assert!(load_skill(&root, "no_such_skill").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_root_skill_config_is_discoverable() {
+        // 仓库根（CARGO_MANIFEST_DIR 的上级的上级）下的 .forgeone/skills 真实配置
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let skills = discover_skills(workspace_root).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"code-review"), "code-review 应被发现，实际: {names:?}");
+        let review = skills.iter().find(|s| s.name == "code-review").unwrap();
+        assert!(review.description.contains("结构化审查"));
+        assert!(review.body.contains("{{focus}}"), "body 应保留模板占位符");
     }
 }

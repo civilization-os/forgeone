@@ -1,4 +1,5 @@
 pub mod mcp_server;
+pub mod store;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -8,6 +9,11 @@ pub fn run() {
             println!("Another instance tried to launch with args: {:?}", args);
             // In a real app, we would focus the main window here
         }))
+        .invoke_handler(tauri::generate_handler![
+            store::store_read,
+            store::store_write,
+            store::store_remove,
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

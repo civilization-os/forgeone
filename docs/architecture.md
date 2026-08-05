@@ -185,7 +185,13 @@ Skill System 提供面向任务模式的轻量能力组合，适合表达：
 - 特定工作流的上下文补充规则
 - 若干工具与策略的推荐组合
 
-Skill 不替代 Runtime，只在 Runtime 允许的边界内增强任务表现。
+实现机制：`SKILL.md`（frontmatter 声明 name/description/version + Markdown 指令正文）
+经 `invoke_skill` 以 `{{param}}` 模板渲染后作为「上下文/指令注入」提供给模型，
+可用 Skill 清单由 Agent Loop 启动时枚举并注入 system 上下文（项目级/全局两级发现，
+见 [specs/skill-spec.md](../specs/skill-spec.md)）。
+
+Skill 不替代 Runtime，只在 Runtime 允许的边界内增强任务表现；Runtime 不驱动
+Skill 内的多步执行（与 Workflow 的可执行模板语义相区分）。
 
 ### Policy Engine
 

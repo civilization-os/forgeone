@@ -195,9 +195,11 @@ CLI 的设计原则：
 
 当前 `MCP / Plugin / Skill` 的落地边界是：
 
-- 已支持扩展清单发现、能力枚举与 CLI 可见性
+- MCP 已接入主执行链路：`.forgeone/mcp/*.json` 清单由 Agent Loop 启动时自动发现并注册（幂等），工具以 `{server}__{tool}` 命名、`inputSchema` 转发给 LLM，调用走统一 Tool Call 链路（见 [docs/mcp-integration.md](/root/project/ai/forgeone/docs/mcp-integration.md)）
+- Skill 已接入主执行链路：`.forgeone/skills/*/SKILL.md` frontmatter 解析、`{{param}}` 模板渲染、项目级/全局两级发现，`invoke_skill` 以「上下文/指令注入」语义加载并渲染 Skill，清单注入 Agent Loop 系统上下文（见 [specs/skill-spec.md](/root/project/ai/forgeone/specs/skill-spec.md)）
+- Plugin Entrypoint 尚未接入主执行链路
+- 已支持扩展清单发现与能力枚举（Skill 入口为桌面端；CLI 已弃用）
 - 已在 Tool Runtime 内保留统一 Provider / Tool Descriptor 边界
-- 尚未把外部 MCP Server、Plugin Entrypoint、Skill Entrypoint 接入主执行链路
 
 当前仍处于早期实现阶段，重点是把 Runtime、Context、Tool、Policy、Trace 的执行语义继续做实，并逐步补齐更完整的 CLI / TUI / 扩展面。
 ## 后端下一阶段

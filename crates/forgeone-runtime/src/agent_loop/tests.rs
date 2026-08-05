@@ -142,6 +142,64 @@ fn locate_tools_default_to_workspace_when_path_missing() {
     );
 }
 
+/// 内置工具表应暴露 invoke_skill，使模型能看到 Skill 能力
+#[test]
+fn builtin_tool_defs_include_invoke_skill() {
+    let defs = builtin_tool_defs();
+    assert!(
+        defs.iter().any(|d| d.name == "invoke_skill"),
+        "builtin_tool_defs 应包含 invoke_skill"
+    );
+}
+
+/// AgentLoop 应拦截 invoke_skill：以 workspace 根解析 SKILL.md 并渲染模板参数，
+/// 不依赖进程 cwd（SkillTool 本体无 workspace 感知，仅作兜底）
+#[test]
+fn execute_tool_intercepts_invoke_skill_with_workspace() {
+    let agent = AgentLoop::default();
+    let root = std::env::temp_dir().join(format!("forgeone_skill_test_{}", std::process::id()));
+    let skill_dir = root.join(".forgeone").join("skills").join("demo");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\nReview {{path}} now.",
+    )
+    .expect("write SKILL.md");
+
+    let tool_call = LlmToolCall {
+        id: "s1".to_string(),
+        name: "invoke_skill".to_string(),
+        input: serde_json::json!({ "name": "demo", "path": "src/main.rs" }),
+    };
+    let out = agent
+        .execute_tool(&tool_call, &root.to_string_lossy().as_ref(), 0)
+        .expect("invoke_skill 应成功");
+    assert!(
+        out.contains("Review src/main.rs now."),
+        "应渲染 {{path}} 占位符，实际输出: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 不存在的 skill 应返回明确的错误语义
+#[test]
+fn execute_tool_invoke_skill_reports_not_found() {
+    let agent = AgentLoop::default();
+    let tool_call = LlmToolCall {
+        id: "s2".to_string(),
+        name: "invoke_skill".to_string(),
+        input: serde_json::json!({ "name": "no_such_skill" }),
+    };
+    let err = agent
+        .execute_tool(&tool_call, "", 0)
+        .expect_err("不存在的 skill 应报错");
+    assert!(
+        err.contains("skill_not_found"),
+        "错误信息应包含 skill_not_found，实际: {err}"
+    );
+}
+
 /// 前后端契约：AgentEvent 序列化为 snake_case tag 的 SSE 事件
 #[test]
 fn agent_event_serde_snake_case_roundtrip() {
